@@ -42,7 +42,7 @@ async def list_users(db: AsyncSession = Depends(get_db)):
         # Container status
         c = (await db.execute(select(Container).where(Container.user_id == u.id))).scalar_one_or_none()
         # Today's usage
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         used = (await db.execute(
             select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(
                 UsageRecord.user_id == u.id,
@@ -93,7 +93,7 @@ async def pause_user_container(user_id: str, db: AsyncSession = Depends(get_db))
 @router.get("/usage/summary")
 async def usage_summary(db: AsyncSession = Depends(get_db)):
     """Global usage summary for the platform."""
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     total_today = (await db.execute(
         select(func.coalesce(func.sum(UsageRecord.total_tokens), 0)).where(
             UsageRecord.created_at >= today_start,

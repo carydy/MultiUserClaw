@@ -424,6 +424,8 @@ docker build -t nanobot:latest .
 ## 启动gateway和web端，web端供用户访问，gateway给每个用户创建nanobot容器
 docker compose build --no-cache frontend && docker compose up -d 
 docker compose build --no-cache gateway && docker compose up -d
+删除gateway和用户容器，重建，防止缓存问题
+docker compose build --no-cache gateway && docker rm -f nanobot-user-9abeea27 && docker compose up -d
 docker compose logs -f 
 docker compose down
 

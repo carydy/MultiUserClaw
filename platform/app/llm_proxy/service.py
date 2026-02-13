@@ -172,7 +172,7 @@ async def proxy_chat_completion(
         await db.commit()
 
     # 6. Update container last_active_at
-    container.last_active_at = datetime.now(timezone.utc)
+    container.last_active_at = datetime.utcnow()
     await db.commit()
 
     # 7. Return OpenAI-compatible response
