@@ -31,6 +31,10 @@
 ![multi_users_chat.png](doc/multi_users_chat.png)
 ![multi_users_docker.png](doc/multi_users_docker.png)
 
+交互式创建skills
+![skill_create1.png](doc/skill_create1.png)
+![skill_create2.png](doc/skill_create2.png)
+
 ## 1. 多租户部署（Docker Compose）
 
 多租户模式下，每个用户拥有独立的 nanobot 容器，数据完全隔离。用户无需管理 API Key，只需注册登录即可使用。
