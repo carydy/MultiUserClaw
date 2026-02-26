@@ -134,7 +134,16 @@ JWT_SECRET=your-secure-random-string
 
 Gateway 根据模型名自动匹配提供商并注入对应的 API Key，用户容器内不存储任何密钥。
 
-### 1.5 推荐Docker构建与启动
+
+### 1.5 构建与启动
+
+方式1:一键部署或者一键测试脚本
+
+python start_local.py 一键测试，在本地运行。
+
+python deploy_docker.py  一键部署到服务器，可以仔细查看下配置信息。
+
+方式2:手动启动
 
 ```bash
 # 1. 构建 nanobot 基础镜像（用户容器使用）
