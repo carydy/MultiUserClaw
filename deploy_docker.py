@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Nanobot Docker 部署脚本。
+"""OpenClaw Docker 部署脚本。
 
-构建镜像并通过 docker compose 启动所有服务（postgres + gateway + frontend）。
+构建 openclaw 基础镜像并通过 docker compose 启动所有服务（postgres + gateway + frontend）。
 支持本地部署和远程服务器部署（通过 SSH）。
 
 用法:
@@ -9,18 +9,19 @@
   python deploy_docker.py
 
   # 指定服务器 IP（会自动设置 NEXT_PUBLIC_API_URL）
-  python deploy_docker.py --host 192.168.1.10
+  python deploy_docker.py --host 192.168.1.160
 
   # 使用 prod compose 文件
   python deploy_docker.py --host 117.133.60.219 --compose docker-compose.yml.prod
 
-  # 仅构建镜像不启动
+  # 仅构建基础镜像不启动
   python deploy_docker.py --build-only
 
   # 仅重启服务
   python deploy_docker.py --restart
 
-  # 重建某个服务,同时指定host的ip
+  # 重建指定服务（逗号分隔，openclaw 表示基础镜像）
+  python deploy_docker.py --rebuild openclaw,gateway,frontend --host 192.168.1.160
   python deploy_docker.py --rebuild gateway --host 117.133.60.219
   python deploy_docker.py --rebuild frontend
 
@@ -136,31 +137,33 @@ def check_env_file():
         warn(".env 中未找到有效的 API Key，请确认配置")
 
 
-def build_nanobot_image():
-    """构建 nanobot 基础镜像（用户容器使用）。"""
-    log("构建 nanobot:latest 基础镜像...")
-    run("docker build -t nanobot:latest .")
-    success("nanobot:latest 构建完成")
+def build_openclaw_image():
+    """构建 openclaw 基础镜像（用户容器使用）。"""
+    log("构建 openclaw:latest 基础镜像...")
+    run("docker build --no-cache -f openclaw/Dockerfile.bridge -t openclaw:latest openclaw/")
+    success("openclaw:latest 构建完成")
 
 
 def build_and_start(compose_file: str, host: str, gateway_port: int, frontend_port: int):
     """构建并启动所有 compose 服务。"""
     api_url = f"http://{host}:{gateway_port}"
     log(f"Frontend NEXT_PUBLIC_API_URL = {api_url}")
+    os.environ["NEXT_PUBLIC_API_URL"] = api_url
 
-    # 用临时环境变量设置 NEXT_PUBLIC_API_URL
-    # docker-compose.yml 中已经硬编码了这个值，我们通过 sed 或者环境变量覆盖
-    # 更好的方式是修改 compose 文件使用变量
     compose_args = f"-f {compose_file}"
 
     log(f"使用 {compose_file} 构建并启动服务...")
-    run(f"docker compose {compose_args} build --build-arg NEXT_PUBLIC_API_URL={api_url}")
+    run(f"docker compose {compose_args} build")
     run(f"docker compose {compose_args} up -d")
     success("所有服务已启动")
 
 
-def rebuild_service(compose_file: str, service: str):
+def rebuild_service(compose_file: str, service: str, host: str | None = None, gateway_port: int | None = None):
     """重建并重启指定服务。"""
+    if host and gateway_port:
+        api_url = f"http://{host}:{gateway_port}"
+        os.environ["NEXT_PUBLIC_API_URL"] = api_url
+        log(f"NEXT_PUBLIC_API_URL = {api_url}")
     compose_args = f"-f {compose_file}"
     log(f"重建服务: {service}...")
     run(f"docker compose {compose_args} build --no-cache {service}")
@@ -191,7 +194,7 @@ def clean_all(compose_file: str):
 
     log("清理用户容器...")
     result = subprocess.run(
-        'docker ps -a --filter "name=nanobot-user-" -q',
+        'docker ps -a --filter "name=openclaw-user-" -q',
         shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
     )
     container_ids = result.stdout.strip()
@@ -259,7 +262,7 @@ def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: 
     """显示部署状态摘要。"""
     compose_args = f"-f {compose_file}"
     print(f"\n{BOLD}{'=' * 50}{RESET}")
-    print(f"{BOLD}  Nanobot 部署状态{RESET}")
+    print(f"{BOLD}  OpenClaw 部署状态{RESET}")
     print(f"{'=' * 50}")
     print(f"  Frontend:  http://{host}:{frontend_port}")
     print(f"  Gateway:   http://{host}:{gateway_port}")
@@ -272,7 +275,7 @@ def show_status(compose_file: str, host: str, gateway_port: int, frontend_port: 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Nanobot Docker 部署脚本",
+        description="OpenClaw Docker 部署脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -282,9 +285,9 @@ def main():
     parser.add_argument("--frontend-port", type=int, default=3080, help="Frontend 端口 (默认: 3080)")
     parser.add_argument("--build-only", action="store_true", help="仅构建镜像，不启动服务")
     parser.add_argument("--restart", action="store_true", help="仅重启服务")
-    parser.add_argument("--rebuild", metavar="SERVICE", help="重建指定服务 (gateway/frontend)")
+    parser.add_argument("--rebuild", metavar="SERVICES", help="重建指定服务，逗号分隔 (openclaw,gateway,frontend)")
     parser.add_argument("--clean", action="store_true", help="停止所有服务并清理数据")
-    parser.add_argument("--skip-base", action="store_true", help="跳过构建 nanobot 基础镜像")
+    parser.add_argument("--skip-base", action="store_true", help="跳过构建 openclaw 基础镜像")
     parser.add_argument("--skip-health", action="store_true", help="跳过健康检查")
     parser.add_argument("--status", action="store_true", help="仅显示当前状态")
     args = parser.parse_args()
@@ -298,7 +301,7 @@ def main():
 
     os.chdir(PROJECT_DIR)
 
-    print(f"\n{BOLD}🚀 Nanobot Docker 部署{RESET}\n")
+    print(f"\n{BOLD}🚀 OpenClaw Docker 部署{RESET}\n")
 
     # 仅显示状态
     if args.status:
@@ -318,17 +321,54 @@ def main():
         show_status(args.compose, args.host, args.gateway_port, args.frontend_port)
         return
 
-    # 重建单个服务
+    # 重建指定服务（逗号分隔）
     if args.rebuild:
-        rebuild_service(args.compose, args.rebuild)
+        services = [s.strip() for s in args.rebuild.split(",") if s.strip()]
+
+        # "openclaw" 表示重建基础镜像 + 清理旧用户容器
+        if "openclaw" in services:
+            build_openclaw_image()
+            services.remove("openclaw")
+
+            # 清理旧用户容器（它们用的是旧镜像）
+            log("清理旧用户容器...")
+            result = subprocess.run(
+                'docker ps -a --filter "name=openclaw-user-" -q',
+                shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
+            )
+            container_ids = result.stdout.strip()
+            if container_ids:
+                run(f"docker rm -f {container_ids}", check=False)
+                success("旧用户容器已清理")
+
+            # 清理 DB 中的容器记录
+            log("清理数据库容器记录...")
+            run('docker exec openclaw-postgres psql -U nanobot -d nanobot_platform -c "DELETE FROM containers;"', check=False)
+            success("数据库容器记录已清理")
+
+        # 设置 NEXT_PUBLIC_API_URL（frontend 构建需要）
+        if args.host and args.gateway_port:
+            api_url = f"http://{args.host}:{args.gateway_port}"
+            os.environ["NEXT_PUBLIC_API_URL"] = api_url
+            log(f"NEXT_PUBLIC_API_URL = {api_url}")
+
+        # 重建 compose 服务
+        if services:
+            compose_args = f"-f {args.compose}"
+            services_str = " ".join(services)
+            log(f"重建服务: {services_str}...")
+            run(f"docker compose {compose_args} build --no-cache {services_str}")
+            run(f"docker compose {compose_args} up -d {services_str}")
+            success(f"服务 {services_str} 已重建并启动")
+
         show_status(args.compose, args.host, args.gateway_port, args.frontend_port)
         return
 
     check_env_file()
 
-    # 构建 nanobot 基础镜像
+    # 构建 openclaw 基础镜像
     if not args.skip_base:
-        build_nanobot_image()
+        build_openclaw_image()
 
     if args.build_only:
         log("仅构建模式，跳过启动")

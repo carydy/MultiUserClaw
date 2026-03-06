@@ -1,4 +1,4 @@
-"""Docker container lifecycle management for per-user nanobot instances."""
+"""Docker container lifecycle management for per-user openclaw instances."""
 
 from __future__ import annotations
 
@@ -48,65 +48,77 @@ async def get_container_by_token(db: AsyncSession, token: str) -> Container | No
 
 
 async def create_container(db: AsyncSession, user_id: str) -> Container:
-    """Create a Docker container for a user and record metadata in DB."""
+    """Create a Docker container for a user and record metadata in DB.
+
+    Inserts a DB record first to claim the user_id slot (preventing races),
+    then creates the Docker container and updates the record.
+    """
+    container_token = secrets.token_urlsafe(32)
+    short_id = user_id[:8]
+
+    # Insert DB record first to claim the unique user_id slot.
+    # If another request races us, the IntegrityError happens here
+    # BEFORE we create any Docker resources.
+    record = Container(
+        user_id=user_id,
+        docker_id="",
+        container_token=container_token,
+        status="creating",
+        internal_host="",
+        internal_port=18080,
+    )
+    db.add(record)
+    await db.flush()  # raises IntegrityError on duplicate user_id
+
+    # Now safe to create Docker resources — we hold the DB slot.
     _ensure_network()
     client = _docker()
 
-    container_token = secrets.token_urlsafe(32)
+    workspace_vol = f"openclaw-workspace-{short_id}"
+    sessions_vol = f"openclaw-sessions-{short_id}"
+    container_name = f"openclaw-user-{short_id}"
 
-    # Use Docker named volumes for user data persistence.
-    # Named volumes work on all platforms (Linux, macOS Docker Desktop)
-    # without needing file-sharing configuration.
-    short_id = user_id[:8]
-    workspace_vol = f"nanobot-workspace-{short_id}"
-    sessions_vol = f"nanobot-sessions-{short_id}"
-
-    container_name = f"nanobot-user-{short_id}"
-
-    # Remove any stale container with the same name (e.g. from a previous
-    # failed creation attempt that never got recorded in the DB).
+    # Remove any stale container with the same name
     try:
         stale = client.containers.get(container_name)
         stale.remove(force=True)
     except DockerNotFound:
         pass
 
-    docker_container = client.containers.run(
-        image=settings.nanobot_image,
-        command=["web", "--port", "18080", "--host", "0.0.0.0"],
-        name=container_name,
-        detach=True,
-        environment={
-            "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
-            "NANOBOT_PROXY__TOKEN": container_token,
-            "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
-            # No API keys here — they stay on the platform side
-        },
-        mounts=[
-            docker.types.Mount("/root/.nanobot/workspace", workspace_vol, type="volume"),
-            docker.types.Mount("/root/.nanobot/sessions", sessions_vol, type="volume"),
-        ],
-        network=settings.container_network,
-        mem_limit=settings.container_memory_limit,
-        nano_cpus=int(settings.container_cpu_limit * 1e9),
-        pids_limit=settings.container_pids_limit,
-        restart_policy={"Name": "unless-stopped"},
-    )
+    try:
+        docker_container = client.containers.run(
+            image=settings.openclaw_image,
+            command=["node", "bridge/dist/start.js"],
+            name=container_name,
+            detach=True,
+            environment={
+                "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
+                "NANOBOT_PROXY__TOKEN": container_token,
+                "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
+            },
+            mounts=[
+                docker.types.Mount("/root/.openclaw/workspace", workspace_vol, type="volume"),
+                docker.types.Mount("/root/.openclaw/sessions", sessions_vol, type="volume"),
+            ],
+            network=settings.container_network,
+            mem_limit=settings.container_memory_limit,
+            nano_cpus=int(settings.container_cpu_limit * 1e9),
+            pids_limit=settings.container_pids_limit,
+            restart_policy={"Name": "unless-stopped"},
+        )
+    except Exception:
+        # Docker creation failed — remove the placeholder DB record
+        await db.rollback()
+        raise
 
     # Read container IP on the internal network
     docker_container.reload()
     network_settings = docker_container.attrs["NetworkSettings"]["Networks"]
     internal_ip = network_settings.get(settings.container_network, {}).get("IPAddress", "")
 
-    record = Container(
-        user_id=user_id,
-        docker_id=docker_container.id,
-        container_token=container_token,
-        status="running",
-        internal_host=internal_ip,
-        internal_port=18080,
-    )
-    db.add(record)
+    record.docker_id = docker_container.id
+    record.status = "running"
+    record.internal_host = internal_ip
     await db.commit()
     await db.refresh(record)
     return record
@@ -114,6 +126,8 @@ async def create_container(db: AsyncSession, user_id: str) -> Container:
 
 async def ensure_running(db: AsyncSession, user_id: str) -> Container:
     """Return a running container for the user, creating or unpausing as needed."""
+    import asyncio
+
     record = await get_container(db, user_id)
 
     if record is None:
@@ -124,8 +138,23 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             await db.rollback()
             record = await get_container(db, user_id)
             if record is not None:
-                return record
-            raise
+                # Fall through to status handling below
+                pass
+            else:
+                raise
+
+    # Another request is still creating the container — wait for it
+    if record.status == "creating":
+        for _ in range(30):  # wait up to 60s
+            await asyncio.sleep(2)
+            await db.expire(record)
+            record = await get_container(db, user_id)
+            if record is None or record.status != "creating":
+                break
+        if record is None:
+            return await create_container(db, user_id)
+        if record.status == "creating":
+            raise RuntimeError("Container creation timed out")
 
     client = _docker()
 
@@ -144,13 +173,27 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             # Container was removed externally — recreate
             await db.delete(record)
             await db.commit()
-            return await create_container(db, user_id)
+            try:
+                return await create_container(db, user_id)
+            except IntegrityError:
+                await db.rollback()
+                record = await get_container(db, user_id)
+                if record is not None:
+                    return record
+                raise
 
     elif record.status == "archived":
         # Recreate from persisted data volumes
         await db.delete(record)
         await db.commit()
-        return await create_container(db, user_id)
+        try:
+            return await create_container(db, user_id)
+        except IntegrityError:
+            await db.rollback()
+            record = await get_container(db, user_id)
+            if record is not None:
+                return record
+            raise
 
     elif record.status == "running":
         # Verify it's actually running
@@ -161,7 +204,14 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
         except DockerNotFound:
             await db.delete(record)
             await db.commit()
-            return await create_container(db, user_id)
+            try:
+                return await create_container(db, user_id)
+            except IntegrityError:
+                await db.rollback()
+                record = await get_container(db, user_id)
+                if record is not None:
+                    return record
+                raise
 
     return record
 

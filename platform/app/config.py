@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     default_model: str = "claude-sonnet-4-5"
 
     # Docker
-    nanobot_image: str = "nanobot:latest"
-    container_network: str = "nanobot-internal"
+    openclaw_image: str = "openclaw:latest"
+    container_network: str = "openclaw-internal"
     # 🟢 提升资源限制（适合浏览器/agent）
     container_memory_limit: str = "2g"  # 原来 512m
     container_cpu_limit: float = 4.0  # 原来 1.0
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
     # 建议增加 shm（非常重要，防止 Chromium 崩溃）
     container_shm_size: str = "1g"
-    container_data_dir: str = "/data/nanobot-users"
+    container_data_dir: str = "/data/openclaw-users"
 
     # Idle management
     container_idle_pause_minutes: int = 30
@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     port: int = 8080
 
     # Local dev: set to e.g. "http://127.0.0.1:18080" to skip Docker containers
-    dev_nanobot_url: str = ""
+    dev_openclaw_url: str = ""
+
+    # Local dev: OpenClaw Gateway WS URL for direct WS proxy (e.g. "ws://127.0.0.1:18789")
+    dev_gateway_url: str = ""
 
     model_config = {"env_prefix": "PLATFORM_"}
 

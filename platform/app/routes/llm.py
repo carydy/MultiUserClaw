@@ -6,7 +6,7 @@ directly.  The container token is sent as the Bearer token.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,15 +35,22 @@ class ChatCompletionRequest(BaseModel):
 
 @router.post("/chat/completions")
 async def chat_completions(
-    req: ChatCompletionRequest,
+    request: Request,
     authorization: str = Header(...),
     db: AsyncSession = Depends(get_db),
 ):
     """OpenAI-compatible chat completions endpoint for container proxying."""
+    import json as _json
+
     # Extract container token from "Bearer <token>" header
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
     container_token = authorization[7:]
+
+    raw_body = await request.body()
+    raw_json = _json.loads(raw_body)
+
+    req = ChatCompletionRequest(**raw_json)
 
     result = await proxy_chat_completion(
         db=db,
@@ -55,4 +62,14 @@ async def chat_completions(
         tools=req.tools,
         stream=req.stream,
     )
+
+    # Streaming: return SSE response
+    if req.stream:
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return result

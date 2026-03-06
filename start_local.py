@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Nanobot 本地开发启动脚本（跨平台：macOS / Linux / Windows）。
+"""OpenClaw 本地开发启动脚本（跨平台：macOS / Linux / Windows）。
 
 一键启动所有本地开发服务：
   1. PostgreSQL (Docker 容器, 端口 5432)
-  2. nanobot web 后端 (端口 18080)
+  2. openclaw bridge 后端 (端口 18080)
   3. platform gateway (端口 8080)
   4. frontend dev server (端口 3080)
 
@@ -15,10 +15,7 @@
   python start_local.py --only db,gateway,frontend
 
   # 跳过某些服务
-  python start_local.py --skip nanobot
-
-  # 指定 nanobot config
-  python start_local.py --nanobot-config ~/.nanobot/config.json
+  python start_local.py --skip bridge
 
   # 停止所有服务
   python start_local.py --stop
@@ -26,6 +23,7 @@
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -53,8 +51,8 @@ SERVICES = {
         "port": 5432,
         "color": "\033[34m",
     },
-    "nanobot": {
-        "name": "Nanobot Web",
+    "bridge": {
+        "name": "OpenClaw Bridge",
         "port": 18080,
         "color": "\033[35m",
     },
@@ -125,7 +123,7 @@ def start_postgres() -> bool:
 
     # 检查是否已有容器在运行
     result = subprocess.run(
-        ["docker", "ps", "-q", "--filter", "name=^nanobot-local-postgres$"],
+        ["docker", "ps", "-q", "--filter", "name=^openclaw-local-postgres$"],
         capture_output=True, text=True,
     )
     if result.stdout.strip():
@@ -134,21 +132,21 @@ def start_postgres() -> bool:
 
     # 检查是否有已停止的容器
     result = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", "name=^nanobot-local-postgres$"],
+        ["docker", "ps", "-aq", "--filter", "name=^openclaw-local-postgres$"],
         capture_output=True, text=True,
     )
     if result.stdout.strip():
         log("启动已有的 PostgreSQL 容器...")
-        subprocess.run(["docker", "start", "nanobot-local-postgres"], check=True)
+        subprocess.run(["docker", "start", "openclaw-local-postgres"], check=True)
     else:
         log("创建新的 PostgreSQL 容器...")
         subprocess.run([
             "docker", "run", "-d",
-            "--name", "nanobot-local-postgres",
+            "--name", "openclaw-local-postgres",
             "-e", "POSTGRES_USER=nanobot",
             "-e", "POSTGRES_PASSWORD=nanobot",
             "-e", "POSTGRES_DB=nanobot_platform",
-            "-v", "nanobot-local-pgdata:/var/lib/postgresql/data",
+            "-v", "openclaw-local-pgdata:/var/lib/postgresql/data",
             "-p", "5432:5432",
             "postgres:16-alpine",
         ], check=True)
@@ -163,22 +161,35 @@ def start_postgres() -> bool:
 
 def stop_postgres():
     """停止 PostgreSQL 容器。"""
-    subprocess.run(["docker", "stop", "nanobot-local-postgres"], capture_output=True)
+    subprocess.run(["docker", "stop", "openclaw-local-postgres"], capture_output=True)
     success("PostgreSQL 已停止")
 
 
-# ── Nanobot Web ───────────────────────────────────────────────────────
+# ── OpenClaw Bridge ───────────────────────────────────────────────────
 
-def start_nanobot_web(env: dict) -> "subprocess.Popen | None":
-    log("启动 Nanobot Web 后端 (端口 18080)...")
+def start_bridge(env: dict) -> "subprocess.Popen | None":
+    log("启动 OpenClaw Bridge 后端 (端口 18080)...")
 
     if is_port_in_use(18080):
-        warn("端口 18080 已被占用，跳过 nanobot web")
+        warn("端口 18080 已被占用，跳过 bridge")
         return None
 
+    bridge_dir = os.path.join(PROJECT_DIR, "openclaw")
+
+    # 优先使用 tsx 开发模式，否则使用编译后的 JS
+    tsx_path = shutil.which("tsx")
+    if tsx_path:
+        cmd = [tsx_path, "bridge/start.ts"]
+    else:
+        npx_path = shutil.which("npx")
+        if npx_path:
+            cmd = [npx_path, "tsx", "bridge/start.ts"]
+        else:
+            cmd = ["node", "bridge/dist/start.js"]
+
     proc = subprocess.Popen(
-        [sys.executable, "-m", "nanobot", "web", "--port", "18080", "--host", "0.0.0.0"],
-        cwd=PROJECT_DIR,
+        cmd,
+        cwd=bridge_dir,
         env=_base_env(**env),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -186,10 +197,11 @@ def start_nanobot_web(env: dict) -> "subprocess.Popen | None":
     log(f"  PID: {proc.pid}")
 
     # 等待就绪再启动 gateway，避免 gateway 代理时返回 503
-    if wait_for_port(18080, timeout=20, name="Nanobot Web"):
-        success("Nanobot Web 就绪 (端口 18080)")
+    # 首次启动可能需要编译 openclaw（较慢），后续启动会快很多
+    if wait_for_port(18080, timeout=120, name="OpenClaw Bridge"):
+        success("OpenClaw Bridge 就绪 (端口 18080)")
     else:
-        warn("Nanobot Web 启动较慢，继续启动其他服务")
+        warn("OpenClaw Bridge 尚未就绪（首次启动需要编译 openclaw），继续启动其他服务")
 
     return proc
 
@@ -205,8 +217,10 @@ def start_gateway(env: dict) -> "subprocess.Popen | None":
 
     proc_env = _base_env(
         PLATFORM_DATABASE_URL="postgresql+asyncpg://nanobot:nanobot@localhost:5432/nanobot_platform",
-        # 本地开发模式：直接代理到本机 nanobot web，跳过 Docker 容器管理
-        PLATFORM_DEV_NANOBOT_URL="http://127.0.0.1:18080",
+        # 本地开发模式：直接代理到本机 openclaw web，跳过 Docker 容器管理
+        PLATFORM_DEV_OPENCLAW_URL="http://127.0.0.1:18080",
+        # WebSocket 直连 OpenClaw Gateway（跳过 Bridge 的聊天中转）
+        PLATFORM_DEV_GATEWAY_URL="ws://127.0.0.1:18789",
         **env,
     )
 
@@ -316,7 +330,7 @@ def stop_all():
 
 
 def _stop_all_unix():
-    patterns = ["nanobot web", "uvicorn app.main:app", "next dev.*3080"]
+    patterns = ["bridge/start", "openclaw gateway", "uvicorn app.main:app", "next dev.*3080"]
     for pattern in patterns:
         result = subprocess.run(
             f"pgrep -f '{pattern}'",
@@ -334,7 +348,7 @@ def _stop_all_unix():
 
 def _stop_all_windows():
     # 进程名 → 用 tasklist 过滤
-    image_names = ["nanobot.exe", "python.exe", "node.exe"]
+    image_names = ["openclaw.exe", "python.exe", "node.exe"]
     for image in image_names:
         try:
             result = subprocess.run(
@@ -361,9 +375,9 @@ def _stop_all_windows():
 # ── 主入口 ────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Nanobot 本地开发启动脚本")
+    parser = argparse.ArgumentParser(description="OpenClaw 本地开发启动脚本")
     parser.add_argument("--stop", action="store_true", help="停止所有本地服务")
-    parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,nanobot,gateway,frontend)")
+    parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,bridge,gateway,frontend)")
     parser.add_argument("--skip", type=str, help="跳过指定服务，逗号分隔")
     parser.add_argument("--no-tail", action="store_true", help="不跟踪日志输出")
     args = parser.parse_args()
@@ -373,18 +387,32 @@ def main():
         return
 
     # 解析要启动的服务
-    all_services = ["db", "nanobot", "gateway", "frontend"]
+    all_services = ["db", "bridge", "gateway", "frontend"]
     enabled = [s.strip() for s in args.only.split(",")] if args.only else list(all_services)
     if args.skip:
         skip = {s.strip() for s in args.skip.split(",")}
         enabled = [s for s in enabled if s not in skip]
 
     platform_label = "Windows" if IS_WINDOWS else ("macOS" if sys.platform == "darwin" else "Linux")
-    print(f"\n{BOLD}🔧 Nanobot 本地开发环境 ({platform_label}){RESET}\n")
+    print(f"\n{BOLD}🔧 OpenClaw 本地开发环境 ({platform_label}){RESET}\n")
     log(f"启动服务: {', '.join(enabled)}")
 
     processes: dict = {}
     extra_env: dict = {}
+
+    # Read .env and forward model config to bridge
+    env_path = os.path.join(PROJECT_DIR, ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    key, val = key.strip(), val.strip().strip("'\"")
+                    if key == "DEFAULT_MODEL" and val:
+                        # Strip provider prefix (e.g. "dashscope/qwen3-coder-plus" → "qwen3-coder-plus")
+                        model = val.split("/", 1)[-1] if "/" in val else val
+                        extra_env["NANOBOT_AGENTS__DEFAULTS__MODEL"] = model
 
     try:
         # 1. PostgreSQL
@@ -397,11 +425,11 @@ def main():
             if not start_postgres():
                 sys.exit(1)
 
-        # 2. Nanobot Web 后端（含就绪等待，gateway 代理依赖它）
-        if "nanobot" in enabled:
-            proc = start_nanobot_web(extra_env)
+        # 2. OpenClaw Bridge 后端（含就绪等待，gateway 代理依赖它）
+        if "bridge" in enabled:
+            proc = start_bridge(extra_env)
             if proc:
-                processes["nanobot"] = proc
+                processes["bridge"] = proc
 
         # 3. Platform Gateway
         if "gateway" in enabled:

@@ -1,4 +1,4 @@
-"""Request routing — reverse-proxy from gateway to per-user nanobot containers.
+"""Request routing — reverse-proxy from gateway to per-user openclaw containers.
 
 Authenticated users' API requests (chat, sessions, WebSocket) are
 forwarded to their individual Docker container.
@@ -16,20 +16,20 @@ from app.container.manager import ensure_running
 from app.db.engine import async_session, get_db
 from app.db.models import User
 
-router = APIRouter(prefix="/api/nanobot", tags=["proxy"])
+router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
 
 
 async def _container_url(db: AsyncSession, user: User) -> str:
-    """Get the internal URL for the user's nanobot container, starting it if needed."""
-    # Local dev mode: bypass Docker, forward to local nanobot web directly
-    if settings.dev_nanobot_url:
-        return settings.dev_nanobot_url
+    """Get the internal URL for the user's openclaw container, starting it if needed."""
+    # Local dev mode: bypass Docker, forward to local openclaw web directly
+    if settings.dev_openclaw_url:
+        return settings.dev_openclaw_url
     container = await ensure_running(db, user.id)
     return f"http://{container.internal_host}:{container.internal_port}"
 
 
 # ---------------------------------------------------------------------------
-# HTTP reverse proxy  (catch-all for /api/nanobot/{path})
+# HTTP reverse proxy  (catch-all for /api/openclaw/{path})
 # ---------------------------------------------------------------------------
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -39,7 +39,7 @@ async def proxy_http(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Forward HTTP requests to the user's nanobot container."""
+    """Forward HTTP requests to the user's openclaw container."""
     base_url = await _container_url(db, user)
     # Close the session explicitly so the connection returns to the pool
     # before the potentially long upstream call (up to 120s).
@@ -64,7 +64,7 @@ async def proxy_http(
         except httpx.ConnectError:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Nanobot container is starting up, please retry in a few seconds",
+                detail="OpenClaw container is starting up, please retry in a few seconds",
             )
 
     ct = resp.headers.get("content-type", "")
@@ -84,16 +84,15 @@ async def proxy_http(
 # WebSocket reverse proxy
 # ---------------------------------------------------------------------------
 
-@router.websocket("/ws/{session_id}")
+@router.websocket("/ws")
 async def proxy_websocket(
     websocket: WebSocket,
-    session_id: str,
     token: str = "",  # passed as query param ?token=xxx
 ):
-    """Forward WebSocket connections to the user's nanobot container."""
+    """Forward WebSocket connections directly to OpenClaw Gateway."""
     from app.auth.service import decode_token, get_user_by_id
 
-    # Authenticate and resolve container URL, then release DB session immediately
+    # Authenticate, then release DB session immediately
     async with async_session() as db:
         payload = decode_token(token)
         if payload is None or payload.get("type") != "access":
@@ -105,41 +104,67 @@ async def proxy_websocket(
             await websocket.close(code=4001, reason="User not found")
             return
 
-        if settings.dev_nanobot_url:
-            # Local dev mode: connect to local nanobot web directly
-            target_ws_url = settings.dev_nanobot_url.replace("http://", "ws://").replace("https://", "wss://") + f"/ws/{session_id}"
+        if settings.dev_gateway_url:
+            target_ws_url = settings.dev_gateway_url
+        elif settings.dev_openclaw_url:
+            # Fallback: derive gateway URL from openclaw URL
+            target_ws_url = settings.dev_openclaw_url.replace("http://", "ws://").replace("https://", "wss://")
+            if not target_ws_url.endswith("/ws"):
+                target_ws_url = target_ws_url.rstrip("/") + "/ws"
         else:
             container = await ensure_running(db, user.id)
-            target_ws_url = f"ws://{container.internal_host}:{container.internal_port}/ws/{session_id}"
+            # Connect to bridge WS relay (port 18080), not gateway directly
+            target_ws_url = f"ws://{container.internal_host}:18080/ws"
     # DB session is now released — not held during long-lived WebSocket relay
 
     await websocket.accept()
 
+    import asyncio
     import websockets
 
     try:
-        async with websockets.connect(target_ws_url) as upstream:
-            import asyncio
+        # Retry connection — container gateway may still be starting
+        upstream = None
+        for _attempt in range(10):
+            try:
+                upstream = await websockets.connect(target_ws_url, origin="http://127.0.0.1:8080")
+                break
+            except (ConnectionRefusedError, OSError):
+                if _attempt < 9:
+                    await asyncio.sleep(2)
+        if upstream is None:
+            await websocket.close(code=1013, reason="Container gateway not ready")
+            return
 
-            async def client_to_upstream():
-                try:
-                    while True:
-                        data = await websocket.receive_text()
-                        await upstream.send(data)
-                except WebSocketDisconnect:
-                    pass
+        async def client_to_upstream():
+            try:
+                while True:
+                    data = await websocket.receive_text()
+                    await upstream.send(data)
+            except (WebSocketDisconnect, Exception):
+                pass
 
-            async def upstream_to_client():
-                try:
-                    async for message in upstream:
+        async def upstream_to_client():
+            try:
+                async for message in upstream:
+                    try:
                         await websocket.send_text(message)
-                except websockets.ConnectionClosed:
-                    pass
+                    except RuntimeError:
+                        break
+            except websockets.ConnectionClosed:
+                pass
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+        tasks = [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+        finally:
+            await upstream.close()
 
-    except Exception:
-        pass
+    except Exception as exc:
+        import traceback
+        print(f"[ws-proxy] Error: {exc}\n{traceback.format_exc()}", flush=True)
     finally:
         try:
             await websocket.close()

@@ -1,0 +1,33 @@
+FROM node:22-slim
+
+# Install git (needed for marketplace git clone) and psmisc (fuser, needed by --force)
+RUN apt-get update && apt-get install -y git psmisc && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install openclaw dependencies
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ ./patches/
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
+
+# Copy openclaw source and build
+COPY . .
+RUN pnpm build
+
+# Install bridge dependencies
+WORKDIR /app
+COPY bridge-package.json /app/bridge/package.json
+RUN cd bridge && npm install --production=false
+
+# Build bridge TypeScript
+RUN cd bridge && npx tsc -p /app/tsconfig.bridge.json
+
+WORKDIR /app
+
+EXPOSE 18080 18789
+
+COPY bridge-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["node", "bridge/dist/start.js"]

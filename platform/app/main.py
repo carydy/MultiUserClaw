@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Nanobot Platform",
+    title="OpenClaw Platform",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -87,7 +87,7 @@ app.include_router(admin.router)
 
 @app.get("/api/ping")
 async def ping():
-    return {"message": "pong", "service": "nanobot-platform"}
+    return {"message": "pong", "service": "openclaw-platform"}
 
 
 if __name__ == "__main__":

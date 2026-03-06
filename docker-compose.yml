@@ -1,4 +1,4 @@
-# Nanobot Multi-Tenant Deployment
+# OpenClaw Multi-Tenant Deployment
 #
 # Architecture:
 #   frontend (public:3000) → gateway (internal+external) → per-user containers (internal only)
@@ -8,8 +8,11 @@
 # User containers are created dynamically by the gateway via Docker API,
 # NOT defined in this compose file.
 
+name: openclaw
+
 services:
   postgres:
+    container_name: openclaw-postgres
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: nanobot
@@ -20,7 +23,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - nanobot-internal
+      - openclaw-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nanobot -d nanobot_platform"]
       interval: 5s
@@ -28,6 +31,7 @@ services:
       retries: 5
 
   gateway:
+    container_name: openclaw-gateway
     build: ./platform
     ports:
       - "8080:8080"
@@ -48,38 +52,39 @@ services:
       PLATFORM_HOSTED_VLLM_API_BASE: ${HOSTED_VLLM_API_BASE:-}
 
       PLATFORM_DEFAULT_MODEL: ${DEFAULT_MODEL:-dashscope/qwen3-coder-plus}
-      PLATFORM_NANOBOT_IMAGE: nanobot:latest
-      PLATFORM_CONTAINER_NETWORK: nanobot-internal
-      PLATFORM_CONTAINER_DATA_DIR: /data/nanobot-users
+      PLATFORM_OPENCLAW_IMAGE: openclaw:latest
+      PLATFORM_CONTAINER_NETWORK: openclaw-internal
+      PLATFORM_CONTAINER_DATA_DIR: /data/openclaw-users
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker API access for container management
-      - userdata:/data/nanobot-users
+      - userdata:/data/openclaw-users
     networks:
-      - nanobot-internal   # talk to postgres + user containers
-      - nanobot-external   # accept traffic from frontend / public
+      - openclaw-internal   # talk to postgres + user containers
+      - openclaw-external   # accept traffic from frontend / public
     depends_on:
       postgres:
         condition: service_healthy
 
   frontend:
+    container_name: openclaw-frontend
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_URL: http://192.168.1.10:8080
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     ports:
       - "3080:3000"
     networks:
-      - nanobot-external
+      - openclaw-external
     depends_on:
       - gateway
 
 networks:
-  nanobot-internal:
-    name: nanobot-internal    # explicit name — prevents Compose project-name prefix
+  openclaw-internal:
+    name: openclaw-internal    # explicit name — prevents Compose project-name prefix
     driver: bridge
     internal: false  # allow internet access for user containers to download tools
-  nanobot-external:
-    name: nanobot-external
+  openclaw-external:
+    name: openclaw-external
     driver: bridge
 
 volumes:

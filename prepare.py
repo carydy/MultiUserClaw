@@ -4,13 +4,14 @@
 检查并自动安装本地开发所需的全部依赖：
   1. Python 版本 ≥ 3.11
   2. Docker 守护进程运行状态
-  3. Docker 镜像 postgres:16-alpine
+  3. Docker 镜像 postgres:16-alpine, node:22-slim
   4. .env 环境变量配置
   5. uv 包管理器
-  6. nanobot 主项目 Python 依赖 (uv sync)
-  7. Platform Gateway Python 依赖
-  8. Node.js / npm
-  9. 前端 node_modules (npm install)
+  6. Platform Gateway Python 依赖
+  7. Node.js / npm / pnpm
+  8. 前端 node_modules (npm install)
+  9. OpenClaw Bridge 依赖 (npm install)
+  10. OpenClaw 主项目依赖 (pnpm install)
 
 用法:
   python prepare.py           # 检查并自动修复所有问题
@@ -355,24 +356,92 @@ def check_frontend_deps(fix: bool) -> CheckResult:
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 
+OPENCLAW_DIR = PROJECT_DIR / "openclaw"
+BRIDGE_DIR   = OPENCLAW_DIR / "bridge"
+
+
+def check_openclaw_deps(fix: bool) -> CheckResult:
+    """检查 openclaw 主项目依赖是否已安装（pnpm install）。"""
+    nm = OPENCLAW_DIR / "node_modules"
+    if nm.exists() and any(nm.iterdir()):
+        return CheckResult(True, "openclaw node_modules 已就绪")
+
+    if not fix:
+        return CheckResult(False, "openclaw node_modules 不存在，运行 prepare.py 自动安装")
+
+    pnpm = shutil.which("pnpm")
+    if not pnpm:
+        # Try installing pnpm first
+        info("正在安装 pnpm...")
+        subprocess.run("npm install -g pnpm", shell=True, text=True)
+        pnpm = shutil.which("pnpm")
+        if not pnpm:
+            return CheckResult(False, "pnpm 未安装，请先运行: npm install -g pnpm")
+
+    info("正在执行 pnpm install（openclaw 主项目）...")
+    r = subprocess.run(
+        f"{pnpm} install",
+        cwd=str(OPENCLAW_DIR),
+        shell=True, text=True,
+    )
+    if r.returncode == 0:
+        return CheckResult(True, "pnpm install 完成", fixed=True)
+    return CheckResult(False, f"pnpm install 失败（exit {r.returncode}）")
+
+
+def check_bridge_deps(fix: bool) -> CheckResult:
+    """检查 bridge 依赖是否已安装（npm install in bridge/）。"""
+    nm = BRIDGE_DIR / "node_modules"
+    if nm.exists() and any(nm.iterdir()):
+        return CheckResult(True, "bridge node_modules 已就绪")
+
+    if not BRIDGE_DIR.exists():
+        return CheckResult(False, f"{BRIDGE_DIR} 目录不存在")
+
+    # Check if package.json exists (copied from bridge-package.json)
+    pkg_json = BRIDGE_DIR / "package.json"
+    if not pkg_json.exists():
+        bridge_pkg = OPENCLAW_DIR / "bridge-package.json"
+        if bridge_pkg.exists():
+            if fix:
+                info("从 bridge-package.json 复制 package.json...")
+                import shutil as _sh
+                _sh.copy2(bridge_pkg, pkg_json)
+            else:
+                return CheckResult(False, "bridge/package.json 不存在")
+
+    if not fix:
+        return CheckResult(False, "bridge node_modules 不存在")
+
+    info("正在执行 npm install（bridge 依赖）...")
+    r = subprocess.run(
+        "npm install",
+        cwd=str(BRIDGE_DIR),
+        shell=True, text=True,
+    )
+    if r.returncode == 0:
+        return CheckResult(True, "npm install 完成", fixed=True)
+    return CheckResult(False, f"npm install 失败（exit {r.returncode}）")
+
+
 CHECKS = [
     # (display_name,         checker_fn,              requires_docker, requires_uv)
     ("Python 版本",           check_python,             False, False),
     ("Docker 守护进程",       check_docker_running,     False, False),
     ("Docker 镜像",           None,                     True,  False),  # 特殊处理
     ("uv 包管理器",           check_uv,                 False, False),
-    ("nanobot Python 依赖",   check_nanobot_deps,       False, True),
     ("Platform Python 依赖",  check_platform_deps,      False, False),
     ("Node.js / npm",         check_nodejs,             False, False),
     ("前端 node_modules",     check_frontend_deps,      False, False),
+    ("OpenClaw 主项目依赖",   check_openclaw_deps,      False, False),
+    ("Bridge 依赖",           check_bridge_deps,        False, False),
 ]
 
 DOCKER_IMAGES = [
-    "postgres:16-alpine",  #数据库
-    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",  #后端platform网关
-    "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",  #nanobot用户端
-    "gcr.io/distroless/nodejs20-debian12",
-    "node:20-alpine",
+    "postgres:16-alpine",  # 数据库
+    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",  # 后端 platform 网关
+    "node:22-slim",  # openclaw-bridge 用户容器
+    "node:20-alpine",  # frontend
 ]
 
 
@@ -448,21 +517,8 @@ def main():
     else:
         fail(r.detail)
 
-    # 6. nanobot 主项目依赖
-    step("6. nanobot Python 依赖")
-    if not uv_ok:
-        results["nanobot Python 依赖"] = CheckResult(False, "跳过（uv 不可用）")
-        warn("跳过（uv 不可用）")
-    else:
-        r = check_nanobot_deps(fix=fix)
-        results["nanobot Python 依赖"] = r
-        if r.passed:
-            ok(r.detail)
-        else:
-            fail(r.detail)
-
-    # 7. Platform 依赖
-    step("7. Platform Gateway Python 依赖")
+    # 6. Platform 依赖
+    step("6. Platform Gateway Python 依赖")
     if not uv_ok:
         results["Platform Python 依赖"] = CheckResult(False, "跳过（uv 不可用）")
         warn("跳过（uv 不可用）")
@@ -474,8 +530,8 @@ def main():
         else:
             fail(r.detail)
 
-    # 8. Node.js / npm
-    step("8. Node.js / npm")
+    # 7. Node.js / npm
+    step("7. Node.js / npm")
     r = check_nodejs()
     results["Node.js / npm"] = r
     node_ok = r.passed
@@ -484,14 +540,40 @@ def main():
     else:
         fail(r.detail)
 
-    # 9. 前端 node_modules
-    step("9. 前端 node_modules")
+    # 8. 前端 node_modules
+    step("8. 前端 node_modules")
     if not node_ok:
         results["前端 node_modules"] = CheckResult(False, "跳过（npm 不可用）")
         warn("跳过（npm 不可用）")
     else:
         r = check_frontend_deps(fix=fix)
         results["前端 node_modules"] = r
+        if r.passed:
+            ok(r.detail)
+        else:
+            fail(r.detail)
+
+    # 9. OpenClaw 主项目依赖
+    step("9. OpenClaw 主项目依赖")
+    if not node_ok:
+        results["OpenClaw 主项目依赖"] = CheckResult(False, "跳过（npm 不可用）")
+        warn("跳过（npm 不可用）")
+    else:
+        r = check_openclaw_deps(fix=fix)
+        results["OpenClaw 主项目依赖"] = r
+        if r.passed:
+            ok(r.detail)
+        else:
+            fail(r.detail)
+
+    # 10. Bridge 依赖
+    step("10. Bridge 依赖")
+    if not node_ok:
+        results["Bridge 依赖"] = CheckResult(False, "跳过（npm 不可用）")
+        warn("跳过（npm 不可用）")
+    else:
+        r = check_bridge_deps(fix=fix)
+        results["Bridge 依赖"] = r
         if r.passed:
             ok(r.detail)
         else:

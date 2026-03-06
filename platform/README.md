@@ -1,6 +1,6 @@
-# Nanobot Platform
+# OpenClaw Platform
 
-Nanobot Platform 是一个基于 FastAPI 的多租户网关服务，用于管理和运行 nanobot 实例。
+OpenClaw Platform 是一个基于 FastAPI 的多租户网关服务，用于管理和运行 OpenClaw 实例。
 
 ## 功能特性
 
@@ -22,7 +22,7 @@ Nanobot Platform 是一个基于 FastAPI 的多租户网关服务，用于管理
 ```
 ┌─────────────┐     ┌─────────────────┐     ┌──────────────────┐
 │   Client    │────▶│  Platform API   │────▶│  User Container   │
-│  (Frontend) │     │   (port 8080)    │     │  (nanobot web)    │
+│  (Frontend) │     │   (port 8080)    │     │  (openclaw web)   │
 └─────────────┘     └────────┬────────┘     └──────────────────┘
                              │
                              ▼
@@ -45,7 +45,7 @@ Nanobot Platform 是一个基于 FastAPI 的多租户网关服务，用于管理
 | `PUT /api/admin/users/{user_id}` | 管理员更新用户 |
 | `DELETE /api/admin/users/{user_id}/container` | 管理员删除用户容器 |
 | `GET /api/admin/usage/summary` | 平台使用统计 |
-/api/nanobot代理platform/app/routes/proxy.py的访问
+| `/api/openclaw/*` | 代理到 OpenClaw Gateway（见 platform/app/routes/proxy.py） |
 
 ## 配置说明
 
@@ -56,7 +56,7 @@ Nanobot Platform 是一个基于 FastAPI 的多租户网关服务，用于管理
 | `PLATFORM_DATABASE_URL` | `postgresql+asyncpg://nanobot:nanobot@localhost:5432/nanobot_platform` | 数据库连接 |
 | `PLATFORM_JWT_SECRET` | `change-me-in-production` | JWT 密钥 |
 | `PLATFORM_DEFAULT_MODEL` | `claude-sonnet-4-5` | 新用户默认模型 |
-| `PLATFORM_NANOBOT_IMAGE` | `nanobot:latest` | Docker 镜像 |
+| `PLATFORM_OPENCLAW_IMAGE` | `openclaw:latest` | Docker 镜像 |
 | `PLATFORM_CONTAINER_MEMORY_LIMIT` | `512m` | 容器内存限制 |
 | `PLATFORM_QUOTA_FREE` | `100000` | 免费用户每日配额 |
 
@@ -87,19 +87,22 @@ docker-compose up -d platform
 ```
 
 ## 前端确定用户容器是否启动的原理
-  请求处理流程
 
-  当前端请求 http://192.168.1.160:8080/api/nanobot/sessions/web%3Adefault 时：
+请求处理流程
 
-  1. 入口：proxy.py
-  请求首先到达 platform/app/routes/proxy.py:31 的 proxy_http 函数：
+当前端请求 `http://<host>:8080/api/openclaw/sessions/web%3Adefault` 时：
 
+1. **入口：proxy.py**
+   请求首先到达 `platform/app/routes/proxy.py` 的 `proxy_http` 函数：
+
+   ```python
    @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
    async def proxy_http(path: str, ...):
        base_url = await _container_url(db, user)  # <-- 关键步骤
+   ```
 
-  2. 容器状态检查：ensure_running
-  _container_url 调用 ensure_running 函数（platform/app/container/manager.py:86），这个函数会：
+2. **容器状态检查：ensure_running**
+   `_container_url` 调用 `ensure_running` 函数（`platform/app/container/manager.py`），这个函数会：
 
    1. 从数据库查询容器记录 - 检查该用户是否有容器记录
    2. 根据状态处理：
@@ -108,9 +111,10 @@ docker-compose up -d platform
       - archived → 重新创建
       - running → 验证容器实际运行状态
 
-  3. Docker API 实际检查
-  在 ensure_running 中第 114-117 行：
+3. **Docker API 实际检查**
+   在 `ensure_running` 中：
 
+   ```python
    elif record.status == "running":
        try:
            c = client.containers.get(record.docker_id)
@@ -119,3 +123,4 @@ docker-compose up -d platform
        except DockerNotFound:
            # 容器被外部删除，重新创建
            return await create_container(db, user_id)
+   ```

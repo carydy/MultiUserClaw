@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Nanobot platform health check script.
 
-Checks all services: postgres, gateway, user containers, frontend.
+Checks all services: postgres, gateway, user containers (openclaw-bridge), frontend.
 Usage: python check_status.py [--gateway http://localhost:8080]
 """
 
@@ -124,14 +124,14 @@ def check_user_containers() -> list[dict]:
         if len(parts) < 2:
             continue
         name, status = parts[0], parts[1]
-        # Container is on internal network — use docker exec + curl/wget to check
+        # Container is on internal network — use docker exec + node to check
         web_ok, web_out = run_cmd([
             "docker", "exec", name,
-            "python3", "-c",
-            "import urllib.request,json; "
-            "r=urllib.request.urlopen('http://localhost:18080/api/ping',timeout=3); "
-            "d=json.loads(r.read()); "
-            "print(d.get('message',''))",
+            "node", "-e",
+            "fetch('http://localhost:18080/api/ping')"
+            ".then(r=>r.json())"
+            ".then(d=>{console.log(d.message);process.exit(0)})"
+            ".catch(()=>process.exit(1))",
         ], timeout=10)
         web_ok = web_ok and "pong" in web_out
         containers.append({

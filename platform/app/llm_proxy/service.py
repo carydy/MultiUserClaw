@@ -58,7 +58,9 @@ def _resolve_provider(model: str) -> tuple[str, str, str | None]:
         if keyword in model_lower:
             api_key = getattr(settings, key_attr, "")
             if api_key:
-                return f"openai/{model}", api_key, api_base
+                # Strip provider prefix (e.g. "dashscope/qwen3-coder-plus" → "qwen3-coder-plus")
+                actual_model = model.split("/", 1)[1] if "/" in model else model
+                return f"openai/{actual_model}", api_key, api_base
 
     # Check standard providers
     for keyword, (prefix, key_attr) in _MODEL_PROVIDER_MAP.items():
@@ -121,24 +123,30 @@ async def proxy_chat_completion(
     temperature: float = 0.7,
     tools: list[dict] | None = None,
     stream: bool = False,
-) -> dict:
+):
     """Validate token, check quota, forward to real LLM, record usage."""
 
     # 1. Authenticate container
-    result = await db.execute(
-        select(Container).where(Container.container_token == container_token)
-    )
-    container = result.scalar_one_or_none()
-    if container is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid container token")
+    # In local dev mode (dev_openclaw_url set), skip container token validation
+    # and quota check — the bridge runs locally without a real container record.
+    if settings.dev_openclaw_url:
+        container = None
+        user = None
+    else:
+        result = await db.execute(
+            select(Container).where(Container.container_token == container_token)
+        )
+        container = result.scalar_one_or_none()
+        if container is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid container token")
 
-    # 2. Get user and check quota
-    user_result = await db.execute(select(User).where(User.id == container.user_id))
-    user = user_result.scalar_one_or_none()
-    if user is None or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account disabled")
+        # 2. Get user and check quota
+        user_result = await db.execute(select(User).where(User.id == container.user_id))
+        user = user_result.scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account disabled")
 
-    await _check_quota(db, user)
+        await _check_quota(db, user)
 
     # 3. Resolve provider
     litellm_model, api_key, api_base = _resolve_provider(model)
@@ -150,6 +158,7 @@ async def proxy_chat_completion(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "api_key": api_key,
+        "stream": stream,
     }
     if api_base:
         kwargs["api_base"] = api_base
@@ -165,22 +174,39 @@ async def proxy_chat_completion(
             detail=f"LLM provider error: {e}",
         )
 
-    # 5. Record usage
-    usage = getattr(response, "usage", None)
-    if usage:
-        record = UsageRecord(
-            user_id=user.id,
-            model=model,
-            input_tokens=usage.prompt_tokens or 0,
-            output_tokens=usage.completion_tokens or 0,
-            total_tokens=usage.total_tokens or 0,
-        )
-        db.add(record)
-        await db.commit()
+    # 4b. Streaming: return an async generator that yields SSE chunks
+    if stream:
+        import json
 
-    # 6. Update container last_active_at
-    container.last_active_at = datetime.utcnow()
-    await db.commit()
+        async def _stream_generator():
+            try:
+                async for chunk in response:
+                    data = chunk.model_dump()
+                    yield f"data: {json.dumps(data)}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception:
+                yield "data: [DONE]\n\n"
+
+        return _stream_generator()
+
+    # 5. Record usage (skip in dev mode)
+    if user is not None:
+        usage = getattr(response, "usage", None)
+        if usage:
+            record = UsageRecord(
+                user_id=user.id,
+                model=model,
+                input_tokens=usage.prompt_tokens or 0,
+                output_tokens=usage.completion_tokens or 0,
+                total_tokens=usage.total_tokens or 0,
+            )
+            db.add(record)
+            await db.commit()
+
+    # 6. Update container last_active_at (skip in dev mode)
+    if container is not None:
+        container.last_active_at = datetime.utcnow()
+        await db.commit()
 
     # 7. Return OpenAI-compatible response
     return response.model_dump()
