@@ -9,7 +9,7 @@ http://117.133.60.219:3080
 
 🔔：nanobot014分支是nanobot的0.1.4版本
 🔔：nanobot014v3分支是nanobot的0.1.4 post v3版本
-🔔：当前的main分支是基于openclaw版本
+🔔：当前的main分支是基于openclaw版本, 🦞 OpenClaw 2026.3.3 (eae1484)
 
 ---
 
