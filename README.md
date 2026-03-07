@@ -43,7 +43,8 @@ UPDATE:
 
 ## 界面示例截图
 多个用户的聊天页面和它们独自隔离的容器环境
-![multi_users_chat.png](doc/multi_users_chat.png)
+![openclaw1.png](doc/openclaw1.png)
+![openclaw2.png](doc/openclaw2.png)
 ![multi_users_docker.png](doc/multi_users_docker.png)
 
 交互式创建skills
