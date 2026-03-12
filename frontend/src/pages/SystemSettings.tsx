@@ -9,8 +9,9 @@ import {
   AlertCircle,
   CheckCircle,
   X,
+  RotateCcw,
 } from 'lucide-react'
-import { getStatus, fetchJSON } from '../lib/api'
+import { getStatus, fetchJSON, restartGateway } from '../lib/api'
 
 interface OpenClawConfig {
   gateway?: {
@@ -30,6 +31,7 @@ export default function SystemSettings() {
   const [config, setConfig] = useState<OpenClawConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const [error, setError] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
 
@@ -91,11 +93,27 @@ export default function SystemSettings() {
         method: 'PUT',
         body: JSON.stringify(updates),
       })
-      flash('设置已保存（部分设置需重启网关生效）')
+      flash('设置已保存，请点击「重启网关」使配置生效')
     } catch (err: any) {
       setError(err?.message || '保存失败')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleRestart = async () => {
+    if (!confirm('确定要重启网关？重启期间服务将短暂不可用。')) return
+    setRestarting(true)
+    setError('')
+    try {
+      await restartGateway()
+      flash('网关已重启')
+      // Reload status after restart
+      setTimeout(() => loadData(), 1000)
+    } catch (err: any) {
+      setError(err?.message || '重启失败')
+    } finally {
+      setRestarting(false)
     }
   }
 
@@ -144,9 +162,20 @@ export default function SystemSettings() {
       <div className="space-y-6 max-w-2xl">
         {/* Gateway Status */}
         <section className="rounded-xl border border-dark-border bg-dark-card overflow-hidden">
-          <div className="px-5 py-3 border-b border-dark-border flex items-center gap-2">
-            <Server size={16} className="text-dark-text-secondary" />
-            <h2 className="text-sm font-semibold text-dark-text">网关状态</h2>
+          <div className="px-5 py-3 border-b border-dark-border flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Server size={16} className="text-dark-text-secondary" />
+              <h2 className="text-sm font-semibold text-dark-text">网关状态</h2>
+            </div>
+            <button
+              onClick={handleRestart}
+              disabled={restarting}
+              className="flex items-center gap-1.5 rounded-lg border border-dark-border px-3 py-1.5 text-xs text-dark-text-secondary hover:text-accent-yellow hover:border-accent-yellow transition-colors disabled:opacity-50"
+              title="重启网关"
+            >
+              <RotateCcw size={13} className={restarting ? 'animate-spin' : ''} />
+              {restarting ? '重启中...' : '重启网关'}
+            </button>
           </div>
           <div className="px-5 py-4">
             <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-2.5 text-sm">
@@ -257,7 +286,7 @@ export default function SystemSettings() {
             保存设置
           </button>
           <p className="text-xs text-dark-text-secondary self-center">
-            部分设置需重启网关才能生效
+            保存后请点击上方「重启网关」使配置生效
           </p>
         </div>
       </div>

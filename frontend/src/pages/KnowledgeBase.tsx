@@ -9,7 +9,6 @@ import {
   BookOpen,
   Folder,
   ArrowLeft,
-  Home,
   ChevronRight,
   RefreshCw,
 } from 'lucide-react'

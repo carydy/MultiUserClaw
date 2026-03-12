@@ -143,3 +143,47 @@ openclaw/Dockerfile.bridge 已经包含了完整的 openclaw 主程序（COPY . 
     - 图片（image/*）→ base64 编码作为 attachment 直接发给网关
     - 其他文件（PDF/文档等）→ 先上传到 workspace/uploads/ 目录，然后在消息中插入 [附件: workspace/uploads/xxx.pdf] 引用路径，Agent
   可通过文件系统工具读取处理
+
+
+  WebSocket（精确信号）：
+  - 页面加载时连接 /api/openclaw/ws?token=JWT
+  - 完成 Gateway 握手协议（connect.challenge → connect 请求，protocol v3）
+  - 监听 chat 事件，当 state 为 "final" / "error" / "aborted" 时：
+    - 立即刷新消息列表
+    - 设置 sending=false，结束加载动画
+    - 通过 wsCompletedRef 中断轮询循环
+  - 断线自动重连（3秒）
+
+  轮询（兜底 + 中间消息）：
+  - 每2秒拉取消息列表，实时显示 Agent 的中间回复
+  - 如果 WebSocket 已经触发完成，轮询立即退出
+  - 如果 WebSocket 不可用，15秒稳定阈值兜底
+
+
+  1. 认证失败 (gateway token missing)
+
+  原因: writeOpenclawConfig 保留了用户已有的 gateway 配置，但用户的配置里没有 auth: { mode: "none" }，导致 gateway 要求 token 但 bridge 不带
+  token。
+
+  修复 (config.ts):
+  - gateway.auth = { mode: "none" } 始终强制设置 — bridge 直连 gateway 必须免认证
+  - gateway.mode/port/bind 也始终确保正确
+  - models.mode 不再强制 "replace"，改为默认 "merge"，保留用户的其他 providers（如 moonshot）
+  - controlUi.allowedOrigins 合并用户已有的和默认的
+
+  2. 渠道不启动 (OPENCLAW_SKIP_CHANNELS)
+
+  原因: bridge 启动 gateway 时固定传 OPENCLAW_SKIP_CHANNELS=1，跳过所有渠道。
+
+  修复:
+  - 新增环境变量 BRIDGE_ENABLE_CHANNELS=1 控制是否启用渠道
+  - start_local.py 自动传入 BRIDGE_ENABLE_CHANNELS=1，本地开发模式飞书等渠道正常工作
+  - Docker 模式默认仍跳过（多租户每用户独立容器）
+
+  3. 新增插件管理页面
+
+  - 后端 (plugins.ts): 扫描 ~/.openclaw/extensions/ 目录，读取 openclaw.json 中的 plugins.installs 元数据；新增 POST /api/plugins/install 和
+  DELETE /api/plugins/:name 调用 openclaw CLI 安装/卸载
+  - 前端 (Plugins.tsx): 新页面 /plugins，显示已安装插件列表 + 可用渠道扩展目录（飞书、Matrix、Teams 等），支持一键安装/卸载，带 npm
+  包名输入框手动安装
+  - 侧边栏: 技能中心下新增「插件管理」入口

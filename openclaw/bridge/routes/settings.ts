@@ -2,9 +2,10 @@ import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import type { BridgeConfig } from "../config.js";
+import type { GatewayRestartable } from "../server.js";
 import { asyncHandler } from "../utils.js";
 
-export function settingsRoutes(config: BridgeConfig): Router {
+export function settingsRoutes(config: BridgeConfig, manager?: GatewayRestartable): Router {
   const router = Router();
   const configPath = path.join(config.openclawHome, "openclaw.json");
 
@@ -45,6 +46,21 @@ export function settingsRoutes(config: BridgeConfig): Router {
 
     writeConfig(existing);
     res.json({ success: true, config: existing });
+  }));
+
+  // POST /api/settings/gateway/restart — restart the gateway process
+  router.post("/settings/gateway/restart", asyncHandler(async (_req, res) => {
+    if (!manager) {
+      res.status(501).json({ detail: "Gateway restart not supported in this mode" });
+      return;
+    }
+
+    try {
+      await manager.restart();
+      res.json({ success: true, message: "Gateway restarted" });
+    } catch (err) {
+      res.status(500).json({ detail: (err as Error).message });
+    }
   }));
 
   return router;

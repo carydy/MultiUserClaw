@@ -660,6 +660,49 @@ export async function deleteChannelConfig(channelType: string): Promise<{ ok: bo
   )
 }
 
+// ---------------------------------------------------------------------------
+// Gateway control
+// ---------------------------------------------------------------------------
+
+export async function restartGateway(): Promise<{ success: boolean; message: string }> {
+  return fetchJSON<{ success: boolean; message: string }>('/api/openclaw/settings/gateway/restart', {
+    method: 'POST',
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Plugins / Extensions
+// ---------------------------------------------------------------------------
+
+export interface PluginInfo {
+  name: string
+  description: string
+  source: string
+  version?: string
+  installedAt?: string
+  enabled?: boolean
+  agents: Array<{ name: string; description: string; model: string | null }>
+  commands: Array<{ name: string; description: string; argument_hint: string | null }>
+  skills: string[]
+}
+
+export async function listPlugins(): Promise<PluginInfo[]> {
+  return fetchJSON<PluginInfo[]>('/api/openclaw/plugins')
+}
+
+export async function installPlugin(spec: string): Promise<{ ok: boolean; output: string }> {
+  return fetchJSON<{ ok: boolean; output: string }>('/api/openclaw/plugins/install', {
+    method: 'POST',
+    body: JSON.stringify({ spec }),
+  })
+}
+
+export async function uninstallPlugin(name: string): Promise<{ ok: boolean }> {
+  return fetchJSON<{ ok: boolean }>(`/api/openclaw/plugins/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+}
+
 export async function logoutChannel(
   channelType: string,
   accountId?: string,

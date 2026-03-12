@@ -16,6 +16,7 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import SystemSettings from './pages/SystemSettings'
 import ApiAccess from './pages/ApiAccess'
 import Nodes from './pages/Nodes'
+import Plugins from './pages/Plugins'
 import { isLoggedIn } from './lib/api'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="chat" element={<Chat />} />
         <Route path="skills" element={<SkillStore />} />
         <Route path="channels" element={<Channels />} />
+        <Route path="plugins" element={<Plugins />} />
         <Route path="models" element={<AIModels />} />
         <Route path="files" element={<FileManager />} />
         <Route path="knowledge" element={<KnowledgeBase />} />

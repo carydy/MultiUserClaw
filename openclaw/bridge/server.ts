@@ -18,27 +18,43 @@ import { channelsRoutes } from "./routes/channels.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { nodesRoutes } from "./routes/nodes.js";
 
-export function createServer(client: BridgeGatewayClient, config: BridgeConfig): http.Server {
+export interface GatewayRestartable {
+  restart(): Promise<void>;
+  get client(): BridgeGatewayClient;
+}
+
+export function createServer(client: BridgeGatewayClient, config: BridgeConfig, manager?: GatewayRestartable): http.Server {
   const app = express();
 
   // Middleware
   app.use(express.json({ limit: "50mb" }));
 
+  // When a manager is provided, create a proxy that always delegates to
+  // manager.client (which gets replaced on restart). This way all routes
+  // automatically use the new client after a gateway restart.
+  const liveClient: BridgeGatewayClient = manager
+    ? new Proxy(client, {
+        get(_target, prop, receiver) {
+          return Reflect.get(manager.client, prop, receiver);
+        },
+      })
+    : client;
+
   // Mount routes
-  app.use("/api", sessionsRoutes(client));
-  app.use("/api", statusRoutes(client, config));
+  app.use("/api", sessionsRoutes(liveClient));
+  app.use("/api", statusRoutes(liveClient, config));
   app.use("/api", filesRoutes(config));
   app.use("/api", workspaceRoutes(config));
-  app.use("/api", skillsRoutes(config, client));
+  app.use("/api", skillsRoutes(config, liveClient));
   app.use("/api", commandsRoutes(config));
   app.use("/api", pluginsRoutes(config));
-  app.use("/api", cronRoutes(client));
-  app.use("/api", agentsRoutes(client));
+  app.use("/api", cronRoutes(liveClient));
+  app.use("/api", agentsRoutes(liveClient));
   app.use("/api", marketplacesRoutes(config));
   app.use("/api", filemanagerRoutes(config));
-  app.use("/api", channelsRoutes(client, config));
-  app.use("/api", settingsRoutes(config));
-  app.use("/api", nodesRoutes(client));
+  app.use("/api", channelsRoutes(liveClient, config));
+  app.use("/api", settingsRoutes(config, manager));
+  app.use("/api", nodesRoutes(liveClient));
 
   // Error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

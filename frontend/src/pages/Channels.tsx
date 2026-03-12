@@ -10,7 +10,9 @@ import {
   ChevronUp,
   X,
   Save,
+  CheckCircle,
 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import type {
   ChannelsStatusResult,
   ChannelAccountSnapshot,
@@ -23,63 +25,275 @@ import {
   deleteChannelConfig,
 } from '../lib/api'
 
-// Static channel catalog — always shown even if gateway returns empty
+// Static channel catalog — only real OpenClaw-supported channels
 const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; icon: string }> = [
   { id: 'telegram', label: 'Telegram', description: '通过 Telegram Bot 接入', icon: '✈️' },
   { id: 'discord', label: 'Discord', description: '通过 Discord Bot 接入', icon: '🎮' },
-  { id: 'whatsapp', label: 'WhatsApp', description: '通过 WhatsApp Web 或 Cloud API 接入', icon: '📱' },
+  { id: 'whatsapp', label: 'WhatsApp', description: '通过 WhatsApp Web (Baileys) 接入', icon: '📱' },
   { id: 'slack', label: 'Slack', description: '通过 Slack Bot 接入工作区', icon: '💜' },
-  { id: 'signal', label: 'Signal', description: '通过 signal-cli 接入', icon: '🔒' },
+  { id: 'signal', label: 'Signal', description: '通过 signal-cli 守护进程接入', icon: '🔒' },
   { id: 'imessage', label: 'iMessage', description: '通过 macOS iMessage 接入', icon: '💬' },
   { id: 'web', label: 'Web', description: '内嵌网页对话框', icon: '🌐' },
   { id: 'googlechat', label: 'Google Chat', description: '通过 Google Chat API 接入', icon: '💚' },
-  { id: 'msteams', label: 'Microsoft Teams', description: '通过 Teams Bot 接入', icon: '🟦' },
-  { id: 'dingtalk', label: '钉钉', description: '通过钉钉机器人接入', icon: '📌' },
-  { id: 'feishu', label: '飞书', description: '通过飞书机器人接入', icon: '📘' },
-  { id: 'wecom', label: '企业微信', description: '通过企业微信机器人接入', icon: '💬' },
-  { id: 'qqbot', label: 'QQ', description: '通过 QQ Bot 接入', icon: '🐧' },
-  { id: 'line', label: 'LINE', description: '通过 LINE Messaging API 接入', icon: '🟢' },
-  { id: 'nostr', label: 'Nostr', description: '通过 Nostr 协议接入', icon: '🟣' },
-  { id: 'matrix', label: 'Matrix', description: '通过 Matrix 协议接入', icon: '🔷' },
+  { id: 'msteams', label: 'Microsoft Teams', description: '通过 Azure Bot 接入 Teams', icon: '🟦' },
+  { id: 'feishu', label: '飞书 / Lark', description: '通过飞书/Lark 机器人接入', icon: '📘' },
+  { id: 'matrix', label: 'Matrix', description: '通过 Matrix 协议接入（支持 E2EE）', icon: '🔷' },
+  { id: 'mattermost', label: 'Mattermost', description: '通过 Mattermost Bot 接入', icon: '🔵' },
   { id: 'irc', label: 'IRC', description: '通过 IRC 协议接入', icon: '📡' },
+  { id: 'nostr', label: 'Nostr', description: '通过 Nostr 去中心化协议接入', icon: '🟣' },
+  { id: 'bluebubbles', label: 'BlueBubbles', description: '通过 BlueBubbles 接入 iMessage', icon: '🫧' },
+  { id: 'twitch', label: 'Twitch', description: '通过 Twitch IRC 接入直播聊天', icon: '💜' },
+  { id: 'nextcloud-talk', label: 'Nextcloud Talk', description: '通过 Nextcloud Talk Bot 接入', icon: '☁️' },
+  { id: 'synology-chat', label: 'Synology Chat', description: '通过 Synology Chat Bot 接入', icon: '🟢' },
+  { id: 'zalo', label: 'Zalo', description: '通过 Zalo OA API 接入', icon: '🔵' },
+  { id: 'qqbot', label: 'QQ', description: '通过 QQ 机器人接入（需安装 QQBot 插件）', icon: '🐧' },
 ]
 
 const CHANNEL_ICONS: Record<string, string> = Object.fromEntries(
   CHANNEL_CATALOG.map((ch) => [ch.id, ch.icon]),
 )
 
-// Known channel config fields for common channels
-const CHANNEL_CONFIG_FIELDS: Record<string, Array<{ key: string; label: string; type: 'text' | 'password' | 'boolean'; hint?: string }>> = {
+// DM policy options shared across channels
+const DM_POLICY_OPTIONS = [
+  { value: 'pairing', label: 'pairing — 需配对验证' },
+  { value: 'allowlist', label: 'allowlist — 仅白名单用户' },
+  { value: 'open', label: 'open — 所有人可用' },
+  { value: 'disabled', label: 'disabled — 禁用私聊' },
+]
+
+const GROUP_POLICY_OPTIONS = [
+  { value: 'open', label: 'open — 所有群组' },
+  { value: 'allowlist', label: 'allowlist — 仅白名单群组' },
+  { value: 'disabled', label: 'disabled — 禁用群聊' },
+]
+
+const STREAMING_OPTIONS = [
+  { value: '', label: '（默认）' },
+  { value: 'off', label: 'off — 关闭流式' },
+  { value: 'partial', label: 'partial — 部分流式' },
+  { value: 'block', label: 'block — 按块流式' },
+  { value: 'progress', label: 'progress — 进度指示' },
+]
+
+type FieldType = 'text' | 'password' | 'boolean' | 'select' | 'textarea' | 'number'
+
+interface ChannelField {
+  key: string
+  label: string
+  type: FieldType
+  hint?: string
+  required?: boolean
+  options?: Array<{ value: string; label: string }>
+}
+
+// Channel config fields based on actual OpenClaw source (types.*.ts)
+const CHANNEL_CONFIG_FIELDS: Record<string, ChannelField[]> = {
   telegram: [
-    { key: 'token', label: 'Bot Token', type: 'password', hint: '从 @BotFather 获取' },
-    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户名列表' },
+    { key: 'botToken', label: 'Bot Token', type: 'password', required: true, hint: '从 @BotFather 获取的 Bot Token' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS, hint: '控制谁可以私聊 Bot' },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 Telegram 用户 ID（数字）' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'groupAllowFrom', label: '允许的群组', type: 'text', hint: '逗号分隔的群组 ID' },
+    { key: 'streaming', label: '流式输出', type: 'select', options: STREAMING_OPTIONS },
   ],
   discord: [
-    { key: 'token', label: 'Bot Token', type: 'password', hint: 'Discord Bot Token' },
-    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户ID' },
+    { key: 'token', label: 'Bot Token', type: 'password', required: true, hint: 'Discord Developer Portal 中的 Bot Token' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 Discord 用户 ID' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'streaming', label: '流式输出', type: 'select', options: STREAMING_OPTIONS },
+    { key: 'ackReaction', label: '确认表情', type: 'text', hint: '收到消息时回复的 emoji，如 👀' },
   ],
   slack: [
-    { key: 'botToken', label: 'Bot Token', type: 'password', hint: 'xoxb-...' },
-    { key: 'appToken', label: 'App Token', type: 'password', hint: 'xapp-...' },
-    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户ID' },
+    { key: 'botToken', label: 'Bot Token', type: 'password', required: true, hint: 'xoxb-... 格式的 Bot Token' },
+    { key: 'appToken', label: 'App Token', type: 'password', required: true, hint: 'xapp-... 格式（Socket Mode 需要）' },
+    { key: 'mode', label: '连接模式', type: 'select', options: [
+      { value: 'socket', label: 'socket — Socket Mode（推荐）' },
+      { value: 'http', label: 'http — HTTP Webhook' },
+    ] },
+    { key: 'signingSecret', label: 'Signing Secret', type: 'password', hint: 'HTTP 模式下需要' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 Slack 用户 ID' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'streaming', label: '流式输出', type: 'select', options: STREAMING_OPTIONS },
   ],
   whatsapp: [
-    { key: 'mode', label: '模式', type: 'text', hint: 'web 或 cloud' },
-    { key: 'allowFrom', label: '允许的号码', type: 'text', hint: '逗号分隔' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的号码', type: 'text', hint: '逗号分隔的 E.164 格式号码，如 +8613800138000' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'groupAllowFrom', label: '允许的群组', type: 'text', hint: '逗号分隔的群组 ID' },
+    { key: 'selfChatMode', label: '自聊模式', type: 'boolean', hint: '使用同一手机号对话' },
+    { key: 'debounceMs', label: '消息防抖 (ms)', type: 'number', hint: '合并快速连续消息的等待毫秒数' },
   ],
   signal: [
-    { key: 'cliPath', label: 'signal-cli 路径', type: 'text', hint: '/usr/local/bin/signal-cli' },
-    { key: 'allowFrom', label: '允许的号码', type: 'text', hint: '逗号分隔' },
+    { key: 'account', label: '账号号码', type: 'text', required: true, hint: 'E.164 格式号码，如 +8613800138000' },
+    { key: 'httpUrl', label: 'signal-cli HTTP 地址', type: 'text', hint: '如 http://localhost:8080，signal-cli daemon 地址' },
+    { key: 'autoStart', label: '自动启动 daemon', type: 'boolean' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的号码', type: 'text', hint: '逗号分隔的 E.164 格式号码' },
   ],
-  googlechat: [
-    { key: 'credentialsPath', label: '凭证文件路径', type: 'text' },
-  ],
-  msteams: [
-    { key: 'appId', label: 'App ID', type: 'text' },
-    { key: 'appPassword', label: 'App Password', type: 'password' },
+  imessage: [
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'cliPath', label: 'imsg 路径', type: 'text', hint: 'imsg 二进制文件路径' },
+    { key: 'dbPath', label: '数据库路径', type: 'text', hint: 'Messages.app 数据库路径（可选覆盖）' },
+    { key: 'service', label: '服务类型', type: 'select', options: [
+      { value: 'auto', label: 'auto — 自动选择' },
+      { value: 'imessage', label: 'iMessage' },
+      { value: 'sms', label: 'SMS' },
+    ] },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的联系人', type: 'text', hint: '逗号分隔的 handle 或 chat_id' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'includeAttachments', label: '包含附件', type: 'boolean' },
   ],
   web: [
     { key: 'enabled', label: '启用', type: 'boolean' },
+  ],
+  googlechat: [
+    { key: 'serviceAccountFile', label: '服务账号文件', type: 'text', required: true, hint: 'Service Account JSON 文件路径' },
+    { key: 'audienceType', label: 'Audience 类型', type: 'select', options: [
+      { value: 'app-url', label: 'app-url — 应用 URL' },
+      { value: 'project-number', label: 'project-number — 项目编号' },
+    ] },
+    { key: 'audience', label: 'Audience', type: 'text', hint: '应用 URL 或 GCP 项目编号' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户 ID 或邮箱' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+  ],
+  msteams: [
+    { key: 'appId', label: 'Azure Bot App ID', type: 'text', required: true, hint: 'Azure Bot Registration 的 App ID' },
+    { key: 'appPassword', label: 'App Password', type: 'password', required: true, hint: 'Azure Bot 的 App Password / Client Secret' },
+    { key: 'tenantId', label: 'Tenant ID', type: 'text', hint: 'Azure AD Tenant ID（可选，限定租户）' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 AAD Object ID 或 UPN' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'requireMention', label: '群聊需要 @', type: 'boolean', hint: '群聊中是否需要 @ 提及才回复' },
+  ],
+  feishu: [
+    { key: 'appId', label: 'App ID', type: 'text', required: true, hint: '飞书开放平台 App ID' },
+    { key: 'appSecret', label: 'App Secret', type: 'password', required: true, hint: '飞书开放平台 App Secret' },
+    { key: 'verificationToken', label: 'Verification Token', type: 'password', hint: '事件订阅验证 Token' },
+    { key: 'encryptKey', label: 'Encrypt Key', type: 'password', hint: '消息加密密钥（可选）' },
+    { key: 'domain', label: '域名', type: 'select', options: [
+      { value: 'feishu', label: 'feishu — 飞书（国内）' },
+      { value: 'lark', label: 'lark — Lark（海外）' },
+    ] },
+    { key: 'connectionMode', label: '连接方式', type: 'select', options: [
+      { value: 'websocket', label: 'WebSocket（推荐）' },
+      { value: 'webhook', label: 'Webhook' },
+    ] },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户 ID' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+  ],
+  matrix: [
+    { key: 'homeserver', label: 'Homeserver URL', type: 'text', required: true, hint: '如 https://matrix.org' },
+    { key: 'userId', label: '用户 ID', type: 'text', required: true, hint: '如 @bot:matrix.org' },
+    { key: 'accessToken', label: 'Access Token', type: 'password', hint: '直接提供 Access Token（与密码二选一）' },
+    { key: 'password', label: '密码', type: 'password', hint: '用于自动获取 Token（与 Access Token 二选一）' },
+    { key: 'encryption', label: '端到端加密 (E2EE)', type: 'boolean' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'autoJoin', label: '自动加入', type: 'select', options: [
+      { value: 'off', label: 'off — 不自动加入' },
+      { value: 'allowlist', label: 'allowlist — 仅白名单房间' },
+      { value: 'always', label: 'always — 自动加入所有邀请' },
+    ] },
+  ],
+  mattermost: [
+    { key: 'botToken', label: 'Bot Token', type: 'password', required: true, hint: 'Mattermost Bot Token' },
+    { key: 'baseUrl', label: '服务器地址', type: 'text', required: true, hint: '如 https://mattermost.example.com' },
+    { key: 'chatmode', label: '触发模式', type: 'select', options: [
+      { value: 'oncall', label: 'oncall — @提及触发' },
+      { value: 'onmessage', label: 'onmessage — 任何消息触发' },
+      { value: 'onchar', label: 'onchar — 特定前缀触发' },
+    ] },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户 ID 或 @username' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+    { key: 'requireMention', label: '需要 @提及', type: 'boolean' },
+  ],
+  irc: [
+    { key: 'host', label: '服务器地址', type: 'text', required: true, hint: 'IRC 服务器主机名' },
+    { key: 'port', label: '端口', type: 'number', hint: 'TLS 默认 6697，非 TLS 默认 6667' },
+    { key: 'tls', label: '使用 TLS', type: 'boolean' },
+    { key: 'nick', label: '昵称', type: 'text', required: true, hint: 'Bot 的 IRC 昵称' },
+    { key: 'username', label: '用户名', type: 'text', hint: 'IRC USER 字段用户名' },
+    { key: 'password', label: '服务器密码', type: 'password' },
+    { key: 'channels', label: '频道', type: 'text', hint: '逗号分隔的频道名，如 #general,#bot' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 IRC 昵称' },
+  ],
+  nostr: [
+    { key: 'privateKey', label: '私钥', type: 'password', required: true, hint: 'Nostr 私钥（hex 格式）' },
+    { key: 'relays', label: 'Relay 地址', type: 'text', required: true, hint: '逗号分隔的 Relay URL，如 wss://relay.damus.io' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的公钥或 npub' },
+  ],
+  bluebubbles: [
+    { key: 'serverUrl', label: '服务器 URL', type: 'text', required: true, hint: 'BlueBubbles API 地址' },
+    { key: 'password', label: 'API 密码', type: 'password', required: true, hint: 'BlueBubbles API 密码' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的标识符' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+  ],
+  twitch: [
+    { key: 'username', label: '用户名', type: 'text', required: true, hint: 'Twitch 用户名' },
+    { key: 'accessToken', label: 'Access Token', type: 'password', required: true, hint: 'OAuth Access Token' },
+    { key: 'clientId', label: 'Client ID', type: 'text', required: true, hint: 'Twitch App Client ID' },
+    { key: 'clientSecret', label: 'Client Secret', type: 'password', hint: 'Token 刷新需要' },
+    { key: 'refreshToken', label: 'Refresh Token', type: 'password', hint: 'Token 自动刷新' },
+    { key: 'channel', label: '频道名', type: 'text', required: true, hint: '要加入的 Twitch 频道名' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'requireMention', label: '需要 @提及', type: 'boolean' },
+  ],
+  'nextcloud-talk': [
+    { key: 'baseUrl', label: 'Nextcloud URL', type: 'text', required: true, hint: '如 https://cloud.example.com' },
+    { key: 'botSecret', label: 'Bot Secret', type: 'password', required: true, hint: 'Bot Shared Secret' },
+    { key: 'apiUser', label: 'API 用户', type: 'text', hint: '用于 Room 查询的用户名' },
+    { key: 'apiPassword', label: 'API 密码', type: 'password', hint: 'API 用户的密码' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+  ],
+  'synology-chat': [
+    { key: 'token', label: 'Bot Token', type: 'password', required: true },
+    { key: 'incomingUrl', label: 'Incoming Webhook URL', type: 'text', required: true, hint: 'Synology Chat 的 Incoming Webhook URL' },
+    { key: 'nasHost', label: 'NAS 主机名', type: 'text', required: true, hint: 'NAS 地址' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: [
+      { value: 'open', label: 'open — 所有人可用' },
+      { value: 'allowlist', label: 'allowlist — 仅白名单' },
+      { value: 'disabled', label: 'disabled — 禁用' },
+    ] },
+    { key: 'botName', label: 'Bot 显示名', type: 'text' },
+  ],
+  zalo: [
+    { key: 'botToken', label: 'Bot Token', type: 'password', required: true, hint: 'Zalo OA Bot Token' },
+    { key: 'webhookUrl', label: 'Webhook URL', type: 'text', hint: '需要 HTTPS' },
+    { key: 'webhookSecret', label: 'Webhook Secret', type: 'password' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'dmPolicy', label: '私聊策略', type: 'select', options: DM_POLICY_OPTIONS },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的 Zalo 用户 ID' },
+    { key: 'groupPolicy', label: '群聊策略', type: 'select', options: GROUP_POLICY_OPTIONS },
+  ],
+  qqbot: [
+    { key: 'appId', label: 'App ID', type: 'text', required: true, hint: 'QQ 开放平台的机器人 App ID' },
+    { key: 'clientSecret', label: 'Client Secret', type: 'password', required: true, hint: 'QQ 开放平台的机器人密钥' },
+    { key: 'enabled', label: '启用', type: 'boolean' },
+    { key: 'allowFrom', label: '允许的用户', type: 'text', hint: '逗号分隔的用户 ID，* 表示所有人' },
   ],
 }
 
@@ -104,6 +318,10 @@ export default function Channels() {
 
   // Channels configured in openclaw.json (may not have gateway accounts yet)
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([])
+
+  // Show restart hint after saving channel config
+  const [showRestartHint, setShowRestartHint] = useState(false)
+  const navigate = useNavigate()
 
   const fetchStatus = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true)
@@ -147,12 +365,13 @@ export default function Channels() {
     }
   }
 
-  const handleSaveConfig = async () => {
+  const handleSaveConfig = async (dataOverride?: Record<string, unknown>) => {
     if (!configChannel) return
     setConfigSaving(true)
     try {
-      await saveChannelConfig(configChannel, configData)
+      await saveChannelConfig(configChannel, dataOverride ?? configData)
       setConfigChannel(null)
+      setShowRestartHint(true)
       // Refresh status after config change
       await fetchStatus()
     } catch (err: any) {
@@ -226,6 +445,29 @@ export default function Channels() {
         <div className="mb-4 rounded-lg bg-accent-red/10 p-3 text-sm text-accent-red flex items-center gap-2">
           <AlertCircle size={16} />
           {error}
+        </div>
+      )}
+
+      {showRestartHint && (
+        <div className="mb-4 rounded-lg bg-accent-green/10 p-3 text-sm text-accent-green flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle size={16} />
+            <span>渠道配置已保存，需要重启网关才能生效</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => navigate('/settings')}
+              className="rounded-lg bg-accent-green px-3 py-1 text-xs font-medium text-white hover:bg-accent-green/90 transition-colors"
+            >
+              前往系统设置重启网关
+            </button>
+            <button
+              onClick={() => setShowRestartHint(false)}
+              className="text-accent-green/60 hover:text-accent-green transition-colors"
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -462,9 +704,15 @@ interface ChannelConfigModalProps {
   loading: boolean
   saving: boolean
   onConfigChange: (data: Record<string, unknown>) => void
-  onSave: () => void
+  onSave: (dataOverride?: Record<string, unknown>) => void
   onClose: () => void
 }
+
+// Fields that store arrays (comma-separated in UI → array in JSON)
+const ARRAY_FIELDS = new Set([
+  'allowFrom', 'groupAllowFrom', 'channels', 'relays',
+  'autoJoinAllowlist', 'allowedUserIds',
+])
 
 function ChannelConfigModal({
   channelType,
@@ -496,10 +744,86 @@ function ChannelConfigModal({
     try {
       const parsed = JSON.parse(rawJson)
       onConfigChange(parsed)
-      // Small delay so state updates, then save
-      setTimeout(() => onSave(), 50)
+      onSave(parsed)
     } catch {
       alert('JSON 格式错误')
+    }
+  }
+
+  const getDisplayValue = (field: ChannelField): string => {
+    const val = configData[field.key]
+    if (val === undefined || val === null) return ''
+    if (Array.isArray(val)) return val.join(', ')
+    return String(val)
+  }
+
+  const handleTextChange = (field: ChannelField, raw: string) => {
+    if (ARRAY_FIELDS.has(field.key)) {
+      if (raw === '') {
+        updateField(field.key, [])
+      } else {
+        updateField(field.key, raw.split(',').map((s) => s.trim()).filter(Boolean))
+      }
+    } else if (field.type === 'number') {
+      const num = parseInt(raw, 10)
+      updateField(field.key, isNaN(num) ? undefined : num)
+    } else {
+      updateField(field.key, raw)
+    }
+  }
+
+  const renderField = (field: ChannelField) => {
+    switch (field.type) {
+      case 'boolean':
+        return (
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={configData[field.key] !== false && configData[field.key] !== undefined}
+              onChange={(e) => updateField(field.key, e.target.checked)}
+              className="rounded border-dark-border"
+            />
+            <span className="text-sm text-dark-text">
+              {configData[field.key] !== false && configData[field.key] !== undefined ? '启用' : '禁用'}
+            </span>
+          </label>
+        )
+
+      case 'select':
+        return (
+          <select
+            value={(configData[field.key] as string) || ''}
+            onChange={(e) => updateField(field.key, e.target.value || undefined)}
+            className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text outline-none focus:border-accent-blue"
+          >
+            <option value="">（未设置）</option>
+            {field.options?.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        )
+
+      case 'textarea':
+        return (
+          <textarea
+            value={getDisplayValue(field)}
+            onChange={(e) => handleTextChange(field, e.target.value)}
+            rows={4}
+            placeholder={field.hint}
+            className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text font-mono outline-none focus:border-accent-blue placeholder:text-dark-text-secondary resize-none"
+          />
+        )
+
+      default:
+        return (
+          <input
+            type={field.type === 'password' ? 'password' : 'text'}
+            value={getDisplayValue(field)}
+            onChange={(e) => handleTextChange(field, e.target.value)}
+            placeholder={field.hint}
+            className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text outline-none focus:border-accent-blue placeholder:text-dark-text-secondary"
+          />
+        )
     }
   }
 
@@ -536,7 +860,7 @@ function ChannelConfigModal({
               <textarea
                 value={rawJson}
                 onChange={(e) => setRawJson(e.target.value)}
-                rows={12}
+                rows={16}
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text font-mono outline-none focus:border-accent-blue placeholder:text-dark-text-secondary resize-none"
                 placeholder="{}"
               />
@@ -555,41 +879,10 @@ function ChannelConfigModal({
                 <div key={field.key}>
                   <label className="block text-xs font-medium text-dark-text-secondary mb-1">
                     {field.label}
+                    {field.required && <span className="text-accent-red ml-0.5">*</span>}
                   </label>
-                  {field.type === 'boolean' ? (
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={!!configData[field.key]}
-                        onChange={(e) => updateField(field.key, e.target.checked)}
-                        className="rounded border-dark-border"
-                      />
-                      <span className="text-sm text-dark-text">
-                        {configData[field.key] ? '启用' : '禁用'}
-                      </span>
-                    </label>
-                  ) : (
-                    <input
-                      type={field.type === 'password' ? 'password' : 'text'}
-                      value={
-                        Array.isArray(configData[field.key])
-                          ? (configData[field.key] as string[]).join(', ')
-                          : (configData[field.key] as string) || ''
-                      }
-                      onChange={(e) => {
-                        const val = e.target.value
-                        // Convert comma-separated to array for allowFrom fields
-                        if (field.key === 'allowFrom' && val.includes(',')) {
-                          updateField(field.key, val.split(',').map((s) => s.trim()).filter(Boolean))
-                        } else {
-                          updateField(field.key, val)
-                        }
-                      }}
-                      placeholder={field.hint}
-                      className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-dark-text outline-none focus:border-accent-blue placeholder:text-dark-text-secondary"
-                    />
-                  )}
-                  {field.hint && field.type !== 'boolean' && (
+                  {renderField(field)}
+                  {field.hint && field.type !== 'boolean' && field.type !== 'select' && (
                     <p className="mt-0.5 text-[11px] text-dark-text-secondary">{field.hint}</p>
                   )}
                 </div>
@@ -601,7 +894,7 @@ function ChannelConfigModal({
                 }}
                 className="text-xs text-accent-blue hover:underline"
               >
-                切换到 JSON 模式
+                切换到 JSON 模式（高级）
               </button>
             </div>
           )}
@@ -616,7 +909,7 @@ function ChannelConfigModal({
             取消
           </button>
           <button
-            onClick={rawMode ? handleRawSave : onSave}
+            onClick={rawMode ? handleRawSave : () => onSave()}
             disabled={saving}
             className="flex items-center gap-1.5 rounded-lg bg-accent-blue px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-blue/90 transition-colors disabled:opacity-50"
           >

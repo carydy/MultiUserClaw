@@ -84,7 +84,50 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
   };
 
   const configPath = path.join(configDir, "openclaw.json");
-  fs.writeFileSync(configPath, JSON.stringify(openclawConfig, null, 2), "utf-8");
+
+  // Merge with existing config to preserve user customizations
+  if (fs.existsSync(configPath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+
+      // --- models: add platform-proxy provider alongside user's existing providers ---
+      if (!existing.models) existing.models = {};
+      if (!existing.models.providers) existing.models.providers = {};
+      // Keep user's mode (e.g. "merge") — only default to "merge" if not set
+      if (!existing.models.mode) existing.models.mode = "merge";
+      existing.models.providers["platform-proxy"] = openclawConfig.models.providers["platform-proxy"];
+
+      // --- agents: set default model to platform-proxy ---
+      if (!existing.agents) existing.agents = {};
+      if (!existing.agents.defaults) existing.agents.defaults = {};
+      existing.agents.defaults.model = openclawConfig.agents.defaults.model;
+
+      // --- gateway: always ensure auth.mode = "none" (bridge connects without token) ---
+      if (!existing.gateway) existing.gateway = {};
+      const gw = existing.gateway as Record<string, unknown>;
+      gw.mode = "local";
+      gw.port = cfg.gatewayPort;
+      gw.bind = "loopback";
+      gw.auth = { mode: "none" };
+      // Merge controlUi origins (keep user's + add defaults)
+      if (!gw.controlUi || typeof gw.controlUi !== "object") {
+        gw.controlUi = openclawConfig.gateway.controlUi;
+      } else {
+        const ui = gw.controlUi as Record<string, unknown>;
+        const defaultOrigins = new Set(openclawConfig.gateway.controlUi.allowedOrigins);
+        const existing_origins = Array.isArray(ui.allowedOrigins) ? ui.allowedOrigins as string[] : [];
+        for (const o of existing_origins) defaultOrigins.add(o);
+        ui.allowedOrigins = Array.from(defaultOrigins);
+      }
+
+      fs.writeFileSync(configPath, JSON.stringify(existing, null, 2), "utf-8");
+    } catch {
+      // Corrupted file, overwrite
+      fs.writeFileSync(configPath, JSON.stringify(openclawConfig, null, 2), "utf-8");
+    }
+  } else {
+    fs.writeFileSync(configPath, JSON.stringify(openclawConfig, null, 2), "utf-8");
+  }
 
   // Ensure workspace, uploads, sessions directories exist
   fs.mkdirSync(cfg.workspacePath, { recursive: true });

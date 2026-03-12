@@ -1,4 +1,4 @@
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { loadConfig, writeOpenclawConfig } from "./config.js";
@@ -43,6 +43,115 @@ function resolveGatewayCommand(openclawDir: string): { cmd: string; args: string
   return { cmd: process.execPath, args: [openclawMjs] };
 }
 
+/**
+ * Manages the gateway child process lifecycle, including restart support.
+ */
+class GatewayManager {
+  private proc: ChildProcess | null = null;
+  private restarting = false;
+  private readonly openclawDir: string;
+  private readonly gatewayCmd: string;
+  private readonly gatewayArgs: string[];
+  private readonly gatewayEnv: Record<string, string | undefined>;
+  private readonly gatewayUrl: string;
+
+  client: BridgeGatewayClient;
+
+  constructor(
+    openclawDir: string,
+    cmd: string,
+    args: string[],
+    env: Record<string, string | undefined>,
+    gatewayUrl: string,
+  ) {
+    this.openclawDir = openclawDir;
+    this.gatewayCmd = cmd;
+    this.gatewayArgs = args;
+    this.gatewayEnv = env;
+    this.gatewayUrl = gatewayUrl;
+    this.client = new BridgeGatewayClient(gatewayUrl);
+  }
+
+  async start(): Promise<void> {
+    this.spawnGateway();
+    await waitForGateway(this.gatewayUrl);
+    console.log("[bridge] Gateway is ready");
+    await this.client.start();
+    console.log("[bridge] Connected to gateway");
+  }
+
+  private spawnGateway(): void {
+    console.log(`[bridge] Starting openclaw gateway: ${this.gatewayCmd} ${this.gatewayArgs.join(" ")}`);
+    const proc = spawn(this.gatewayCmd, this.gatewayArgs, {
+      cwd: this.openclawDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: this.gatewayEnv,
+    });
+
+    proc.stdout?.on("data", (data: Buffer) => {
+      process.stdout.write(`[gateway] ${data}`);
+    });
+    proc.stderr?.on("data", (data: Buffer) => {
+      process.stderr.write(`[gateway] ${data}`);
+    });
+    proc.on("exit", (code) => {
+      console.error(`[bridge] Gateway process exited with code ${code}`);
+      if (!this.restarting && code !== 0) process.exit(1);
+    });
+
+    this.proc = proc;
+  }
+
+  async restart(): Promise<void> {
+    if (this.restarting) throw new Error("Already restarting");
+    this.restarting = true;
+    console.log("[bridge] Restarting gateway...");
+
+    try {
+      // Disconnect bridge client
+      this.client.stop();
+
+      // Kill old gateway process
+      if (this.proc && !this.proc.killed) {
+        this.proc.kill("SIGTERM");
+        // Wait for exit (up to 10s)
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            if (this.proc && !this.proc.killed) this.proc.kill("SIGKILL");
+            resolve();
+          }, 10_000);
+          this.proc?.on("exit", () => { clearTimeout(timer); resolve(); });
+        });
+      }
+
+      // Re-read and write config (may have changed via settings API)
+      const config = loadConfig();
+      writeOpenclawConfig(config);
+      console.log("[bridge] Refreshed openclaw config");
+
+      // Spawn new gateway
+      this.spawnGateway();
+      await waitForGateway(this.gatewayUrl);
+      console.log("[bridge] Gateway restarted and ready");
+
+      // Reconnect bridge client
+      this.client = new BridgeGatewayClient(this.gatewayUrl);
+      await this.client.start();
+      console.log("[bridge] Reconnected to gateway");
+    } finally {
+      this.restarting = false;
+    }
+  }
+
+  shutdown(): void {
+    this.client.stop();
+    if (this.proc && !this.proc.killed) this.proc.kill("SIGTERM");
+  }
+}
+
+// Export for use by settings route
+export let gatewayManager: GatewayManager | null = null;
+
 async function main(): Promise<void> {
   console.log("[bridge] Starting openclaw bridge...");
 
@@ -70,8 +179,6 @@ async function main(): Promise<void> {
 
   // Start openclaw gateway as a child process
   const { cmd: gatewayCmd, args: gatewayBaseArgs } = resolveGatewayCommand(openclawDir);
-  // Gateway always binds to loopback (no auth needed). External access goes
-  // through the bridge WS relay on bridgePort instead.
   const gatewayArgs = [
     ...gatewayBaseArgs,
     "gateway", "run",
@@ -80,42 +187,27 @@ async function main(): Promise<void> {
     "--force",
   ];
 
-  console.log(`[bridge] Starting openclaw gateway: ${gatewayCmd} ${gatewayArgs.join(" ")}`);
-  const gatewayProc = spawn(gatewayCmd, gatewayArgs, {
-    cwd: openclawDir,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
+  const gatewayUrl = `ws://127.0.0.1:${config.gatewayPort}`;
+  const manager = new GatewayManager(
+    openclawDir, gatewayCmd, gatewayArgs,
+    {
       ...process.env,
       OPENCLAW_CONFIG_PATH: path.join(config.openclawHome, "openclaw.json"),
       OPENCLAW_STATE_DIR: config.openclawHome,
-      OPENCLAW_SKIP_CHANNELS: "1",
+      // In Docker multi-tenant mode, skip channels (each user gets their own container).
+      // In local dev mode (BRIDGE_ENABLE_CHANNELS=1), let channels start normally.
+      ...(process.env.BRIDGE_ENABLE_CHANNELS === "1" ? {} : { OPENCLAW_SKIP_CHANNELS: "1" }),
     },
-  });
+    gatewayUrl,
+  );
 
-  gatewayProc.stdout?.on("data", (data: Buffer) => {
-    process.stdout.write(`[gateway] ${data}`);
-  });
-  gatewayProc.stderr?.on("data", (data: Buffer) => {
-    process.stderr.write(`[gateway] ${data}`);
-  });
-  gatewayProc.on("exit", (code) => {
-    console.error(`[bridge] Gateway process exited with code ${code}`);
-    if (code !== 0) process.exit(1);
-  });
+  gatewayManager = manager;
 
-  // Wait for gateway to be ready
-  const gatewayUrl = `ws://127.0.0.1:${config.gatewayPort}`;
   console.log(`[bridge] Waiting for gateway at ${gatewayUrl}...`);
-  await waitForGateway(gatewayUrl);
-  console.log("[bridge] Gateway is ready");
-
-  // Connect bridge client to gateway
-  const client = new BridgeGatewayClient(gatewayUrl);
-  await client.start();
-  console.log("[bridge] Connected to gateway");
+  await manager.start();
 
   // Start bridge HTTP server
-  const server = createServer(client, config);
+  const server = createServer(manager.client, config, manager);
   server.listen(config.bridgePort, "0.0.0.0", () => {
     console.log(`[bridge] Bridge server listening on port ${config.bridgePort}`);
   });
@@ -123,8 +215,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = () => {
     console.log("[bridge] Shutting down...");
-    client.stop();
-    gatewayProc.kill("SIGTERM");
+    manager.shutdown();
     server.close();
     process.exit(0);
   };
