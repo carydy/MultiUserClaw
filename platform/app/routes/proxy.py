@@ -6,6 +6,8 @@ forwarded to their individual Docker container.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +18,7 @@ from app.container.manager import ensure_running
 from app.db.engine import async_session, get_db
 from app.db.models import User
 
+logger = logging.getLogger("platform.routes.proxy")
 router = APIRouter(prefix="/api/openclaw", tags=["proxy"])
 
 
@@ -159,8 +162,7 @@ async def proxy_websocket(
             await upstream.close()
 
     except Exception as exc:
-        import traceback
-        print(f"[ws-proxy] Error: {exc}\n{traceback.format_exc()}", flush=True)
+        logger.error("WebSocket 代理异常: %s", exc, exc_info=True)
     finally:
         try:
             await websocket.close()

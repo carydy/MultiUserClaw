@@ -8,7 +8,7 @@ from pathlib import Path
 import docker
 from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -47,28 +47,39 @@ async def get_container_by_token(db: AsyncSession, token: str) -> Container | No
     return result.scalar_one_or_none()
 
 
-async def create_container(db: AsyncSession, user_id: str) -> Container:
+async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     """Create a Docker container for a user and record metadata in DB.
 
     Inserts a DB record first to claim the user_id slot (preventing races),
     then creates the Docker container and updates the record.
+    Returns None if another request already claimed the slot.
     """
     container_token = secrets.token_urlsafe(32)
     short_id = user_id[:8]
 
-    # Insert DB record first to claim the unique user_id slot.
-    # If another request races us, the IntegrityError happens here
-    # BEFORE we create any Docker resources.
-    record = Container(
-        user_id=user_id,
-        docker_id="",
-        container_token=container_token,
-        status="creating",
-        internal_host="",
-        internal_port=18080,
+    # Insert DB record to claim the unique user_id slot.
+    # ON CONFLICT DO NOTHING avoids PostgreSQL ERROR logs on races.
+    stmt = (
+        pg_insert(Container)
+        .values(
+            user_id=user_id,
+            docker_id="",
+            container_token=container_token,
+            status="creating",
+            internal_host="",
+            internal_port=18080,
+        )
+        .on_conflict_do_nothing(index_elements=["user_id"])
+        .returning(Container.__table__.c.id)
     )
-    db.add(record)
-    await db.flush()  # raises IntegrityError on duplicate user_id
+    result = await db.execute(stmt)
+    row = result.first()
+    if row is None:
+        # Another request already claimed this user_id — not an error
+        return None
+
+    await db.flush()
+    record = await get_container(db, user_id)
 
     # Now safe to create Docker resources — we hold the DB slot.
     _ensure_network()
@@ -129,17 +140,13 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
     record = await get_container(db, user_id)
 
     if record is None:
-        try:
-            return await create_container(db, user_id)
-        except IntegrityError:
-            # Race condition: another request created the container first
-            await db.rollback()
-            record = await get_container(db, user_id)
-            if record is not None:
-                # Fall through to status handling below
-                pass
-            else:
-                raise
+        created = await create_container(db, user_id)
+        if created is not None:
+            return created
+        # Race condition: another request created the container first
+        record = await get_container(db, user_id)
+        if record is None:
+            raise RuntimeError("Failed to create or find container")
 
     # Another request is still creating the container — wait for it
     if record.status == "creating":
@@ -171,27 +178,25 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
             # Container was removed externally — recreate
             await db.delete(record)
             await db.commit()
-            try:
-                return await create_container(db, user_id)
-            except IntegrityError:
-                await db.rollback()
-                record = await get_container(db, user_id)
-                if record is not None:
-                    return record
-                raise
+            created = await create_container(db, user_id)
+            if created is not None:
+                return created
+            record = await get_container(db, user_id)
+            if record is not None:
+                return record
+            raise RuntimeError("Failed to recreate container")
 
     elif record.status == "archived":
         # Recreate from persisted data volumes
         await db.delete(record)
         await db.commit()
-        try:
-            return await create_container(db, user_id)
-        except IntegrityError:
-            await db.rollback()
-            record = await get_container(db, user_id)
-            if record is not None:
-                return record
-            raise
+        created = await create_container(db, user_id)
+        if created is not None:
+            return created
+        record = await get_container(db, user_id)
+        if record is not None:
+            return record
+        raise RuntimeError("Failed to recreate container")
 
     elif record.status == "running":
         # Verify it's actually running
@@ -202,14 +207,13 @@ async def ensure_running(db: AsyncSession, user_id: str) -> Container:
         except DockerNotFound:
             await db.delete(record)
             await db.commit()
-            try:
-                return await create_container(db, user_id)
-            except IntegrityError:
-                await db.rollback()
-                record = await get_container(db, user_id)
-                if record is not None:
-                    return record
-                raise
+            created = await create_container(db, user_id)
+            if created is not None:
+                return created
+            record = await get_container(db, user_id)
+            if record is not None:
+                return record
+            raise RuntimeError("Failed to recreate container")
 
     return record
 
