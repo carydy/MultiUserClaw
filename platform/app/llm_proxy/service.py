@@ -25,75 +25,162 @@ logger = logging.getLogger("platform.llm_proxy")
 # ---------------------------------------------------------------------------
 # Model → provider mapping
 # ---------------------------------------------------------------------------
+# 每个 provider 定义:
+#   prefix:      用户在 DEFAULT_MODEL 或前端选模型时使用的前缀，如 "openai/gpt-4o"
+#   key_attr:    settings 中 API Key 的属性名
+#   litellm_fmt: litellm 调用时的模型名格式，{model} 会被替换为去掉前缀后的模型名
+#   api_base:    自定义 API 端点（None 表示使用 litellm 默认）
+#   keywords:    模型名中包含这些关键词时自动匹配（不需要显式前缀）
 
-_MODEL_PROVIDER_MAP: dict[str, tuple[str, str]] = {
-    # keyword in model name → (litellm prefix, settings attr for api key)
-    "claude": ("", "anthropic_api_key"),
-    "gpt": ("", "openai_api_key"),
-    "deepseek": ("deepseek", "deepseek_api_key"),
-    "o1": ("", "openai_api_key"),
-    "o3": ("", "openai_api_key"),
-    "o4": ("", "openai_api_key"),
-    "moonshot": ("", "moonshot_api_key"),
-    "glm": ("", "zhipu_api_key"),
-}
+_PROVIDERS: list[dict] = [
+    # --- 标准云端 provider ---
+    {
+        "prefix": "claude",
+        "key_attr": "anthropic_api_key",
+        "litellm_fmt": "{model}",
+        "api_base": None,
+        "keywords": ["claude"],
+    },
+    {
+        "prefix": "openai",
+        "key_attr": "openai_api_key",
+        "litellm_fmt": "{model}",
+        "api_base": None,
+        "keywords": ["gpt", "o1", "o3", "o4"],
+    },
+    {
+        "prefix": "deepseek",
+        "key_attr": "deepseek_api_key",
+        "litellm_fmt": "deepseek/{model}",
+        "api_base": None,
+        "keywords": ["deepseek"],
+    },
+    # --- 需要自定义 api_base 的 OpenAI 兼容 provider ---
+    {
+        "prefix": "dashscope",
+        "key_attr": "dashscope_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "keywords": ["qwen"],
+    },
+    {
+        "prefix": "kimi",
+        "key_attr": "kimi_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://api.moonshot.cn/v1",
+        "keywords": ["kimi", "moonshot"],
+    },
+    {
+        "prefix": "zhipu",
+        "key_attr": "zhipu_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://open.bigmodel.cn/api/paas/v4",
+        "keywords": ["glm"],
+    },
+    {
+        "prefix": "doubao",
+        "key_attr": "doubao_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+        "keywords": ["doubao"],
+    },
+    {
+        "prefix": "aihubmix",
+        "key_attr": "aihubmix_api_key",
+        "litellm_fmt": "openai/{model}",
+        "api_base": "https://aihubmix.com/v1",
+        "keywords": ["aihubmix"],
+    },
+    # --- 自托管 vLLM ---
+    {
+        "prefix": "vllm",
+        "key_attr": "hosted_vllm_api_key",
+        "litellm_fmt": "hosted_vllm/{model}",
+        "api_base_attr": "hosted_vllm_api_base",  # 从 settings 动态读取
+        "keywords": [],  # 无关键词匹配，仅通过显式前缀或兜底
+    },
+]
 
-# OpenAI-compatible providers that need a custom api_base
-_CUSTOM_BASE_PROVIDERS: dict[str, tuple[str, str]] = {
-    # keyword → (api_base, settings attr for api key)
-    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "dashscope_api_key"),
-    "kimi": ("https://api.moonshot.cn/v1", "kimi_api_key"),
-    "aihubmix": ("https://aihubmix.com/v1", "aihubmix_api_key"),
-}
+# 构建前缀查找表: "claude" → provider dict
+_PREFIX_MAP: dict[str, dict] = {p["prefix"]: p for p in _PROVIDERS}
+
+# 构建关键词查找表: "gpt" → provider dict
+_KEYWORD_MAP: dict[str, dict] = {}
+for _p in _PROVIDERS:
+    for _kw in _p.get("keywords", []):
+        _KEYWORD_MAP[_kw] = _p
 
 # Models that only accept temperature=1 (or don't support temperature at all)
 _FIXED_TEMPERATURE_MODELS = {"kimi-k2.5", "kimi-k2-thinking", "kimi-k2-thinking-turbo"}
 
 
+def _get_provider_key_and_base(provider: dict) -> tuple[str, str | None]:
+    """从 provider 定义中获取 api_key 和 api_base。"""
+    api_key = getattr(settings, provider["key_attr"], "") or ""
+    # api_base 可以是固定值，也可以从 settings 动态读取
+    if "api_base_attr" in provider:
+        api_base = getattr(settings, provider["api_base_attr"], "") or None
+    else:
+        api_base = provider.get("api_base")
+    # vLLM 等无固定 key 的 provider，给个 dummy
+    if not api_key and provider["prefix"] == "vllm":
+        api_key = "dummy"
+    return api_key, api_base
+
+
 def _resolve_provider(model: str) -> tuple[str, str, str | None]:
-    """Return (litellm_model_name, api_key, api_base_or_None) for the given model."""
+    """Return (litellm_model_name, api_key, api_base_or_None) for the given model.
+
+    路由优先级:
+      1. 显式前缀 — "openai/gpt-4o", "vllm/Qwen2.5-7B", "dashscope/qwen-turbo" 等
+      2. 关键词匹配 — 模型名含 "claude"、"gpt"、"qwen" 等自动路由
+      3. 兜底: vLLM → OpenRouter → 报错
+    """
     model_lower = model.lower()
     logger.debug("正在解析模型供应商: model=%r", model)
 
-    # 自托管 vLLM
-    if settings.hosted_vllm_api_base:
-        vllm_key = settings.hosted_vllm_api_key or "dummy"
-        logger.info("模型路由: %s → vLLM (%s)", model, settings.hosted_vllm_api_base)
-        return f"hosted_vllm/{model}", vllm_key, settings.hosted_vllm_api_base
+    # ---- 1. 显式前缀匹配 ----
+    if "/" in model:
+        prefix = model_lower.split("/", 1)[0]
+        if prefix in _PREFIX_MAP:
+            provider = _PREFIX_MAP[prefix]
+            actual_model = model.split("/", 1)[1]
+            api_key, api_base = _get_provider_key_and_base(provider)
+            if api_key:
+                litellm_model = provider["litellm_fmt"].format(model=actual_model)
+                logger.info("模型路由: %s → %s (显式前缀, litellm=%s)", model, prefix, litellm_model)
+                return litellm_model, api_key, api_base
+            else:
+                logger.warning("模型 %s 使用显式前缀 %r，但 %s 为空！", model, prefix, provider["key_attr"])
 
-    # 先检查自定义 base 的供应商（DashScope、Kimi、AiHubMix 等）
-    for keyword, (api_base, key_attr) in _CUSTOM_BASE_PROVIDERS.items():
+    # ---- 2. 关键词自动匹配 ----
+    for keyword, provider in _KEYWORD_MAP.items():
         if keyword in model_lower:
-            api_key = getattr(settings, key_attr, "")
+            api_key, api_base = _get_provider_key_and_base(provider)
             if api_key:
                 actual_model = model.split("/", 1)[1] if "/" in model else model
-                logger.info("模型路由: %s → %s (base=%s, 实际模型=%s)", model, keyword, api_base, actual_model)
-                return f"openai/{actual_model}", api_key, api_base
+                litellm_model = provider["litellm_fmt"].format(model=actual_model)
+                logger.info("模型路由: %s → %s (关键词=%r, litellm=%s)", model, provider["prefix"], keyword, litellm_model)
+                return litellm_model, api_key, api_base
             else:
-                logger.warning("模型 %s 匹配到关键词 %r，但 %s 为空！请检查 .env 配置", model, keyword, key_attr)
+                logger.warning("模型 %s 匹配到关键词 %r，但 %s 为空！", model, keyword, provider["key_attr"])
 
-    # 标准供应商
-    for keyword, (prefix, key_attr) in _MODEL_PROVIDER_MAP.items():
-        if keyword in model_lower:
-            api_key = getattr(settings, key_attr, "")
-            if api_key:
-                litellm_model = f"{prefix}/{model}" if prefix else model
-                logger.info("模型路由: %s → %s (litellm=%s)", model, keyword, litellm_model)
-                return litellm_model, api_key, None
-            else:
-                logger.warning("模型 %s 匹配到关键词 %r，但 %s 为空！请检查 .env 配置", model, keyword, key_attr)
+    # ---- 3. 兜底: vLLM ----
+    if settings.hosted_vllm_api_base:
+        vllm_key = settings.hosted_vllm_api_key or "dummy"
+        logger.info("模型路由: %s → vLLM (兜底, base=%s)", model, settings.hosted_vllm_api_base)
+        return f"hosted_vllm/{model}", vllm_key, settings.hosted_vllm_api_base
 
-    # 兜底：OpenRouter
+    # ---- 4. 兜底: OpenRouter ----
     if settings.openrouter_api_key:
         logger.info("模型路由: %s → OpenRouter (兜底)", model)
         return f"openrouter/{model}", settings.openrouter_api_key, None
 
     logger.error(
-        "找不到模型 %r 的供应商！已检查: 自定义base=%s, 标准=%s, openrouter=%s",
+        "找不到模型 %r 的供应商！已注册前缀: %s, 关键词: %s",
         model,
-        list(_CUSTOM_BASE_PROVIDERS.keys()),
-        list(_MODEL_PROVIDER_MAP.keys()),
-        bool(settings.openrouter_api_key),
+        list(_PREFIX_MAP.keys()),
+        list(_KEYWORD_MAP.keys()),
     )
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

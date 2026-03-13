@@ -35,8 +35,9 @@ http://117.133.60.219:3080/login
 7. [核心组件详解](#5-核心组件详解)
 8. [安全设计](#6-安全设计)
 9. [前端](#7-前端)
-10. [文件索引](#8-文件索引)
-11. [API 调用示例](#9-api-调用示例)
+10. [deploy_copy — 预置 Agent 与技能](#8-deploy_copy--预置-agent-与技能)
+11. [文件索引](#9-文件索引)
+12. [API 调用示例](#10-api-调用示例)
 
 ---
 
@@ -789,9 +790,91 @@ frontend/
 
 ---
 
-## 8. 文件索引
+## 8. deploy_copy — 预置 Agent 与技能
 
-### 8.1 项目根目录
+### 8.1 目录结构
+
+```
+deploy_copy/
+├── openclaw_defaults.json              # OpenClaw 默认配置（合并到 ~/.openclaw/openclaw.json）
+├── Agents/                             # 预置 Agent 工作空间
+│   ├── hr/                             # 人力资源顾问
+│   │   ├── SOUL.md                     # Agent 人格与核心原则
+│   │   ├── AGENTS.md                   # Agent 行为规范与工具指南
+│   │   └── USER.md                     # 用户画像与交互偏好
+│   ├── researcher/                     # 资深研究员
+│   │   ├── SOUL.md
+│   │   ├── AGENTS.md
+│   │   └── USER.md
+│   └── programmer/                     # 全栈工程师
+│       ├── SOUL.md
+│       ├── AGENTS.md
+│       └── USER.md
+└── skills/                             # 预置技能
+    ├── infoxmed-search/                # 医学信息检索
+    │   ├── SKILL.md                    # 技能定义（名称、描述、触发条件）
+    │   └── scripts/infoxmed_search.py  # 执行脚本
+    └── medical-research-agent/         # 医学研究 Agent
+        ├── SKILL.md
+        ├── scripts/search.py
+        └── references/                 # 参考资料（模板、工具说明）
+```
+
+### 8.2 工作原理
+
+deploy_copy 是一个**部署模板目录**，在启动时自动将预置的 Agent 和技能同步到 OpenClaw 运行目录（`~/.openclaw/`）。
+
+**同步流程（幂等，只拷贝不存在的文件）：**
+
+```
+deploy_copy/Agents/hr/          →  ~/.openclaw/workspace-hr/       (Agent 工作空间)
+                                    ~/.openclaw/agents/hr/          (Agent 注册目录)
+                                    openclaw.json → agents.list[]   (注册到配置文件)
+
+deploy_copy/skills/infoxmed-search/  →  ~/.openclaw/skills/infoxmed-search/
+
+deploy_copy/openclaw_defaults.json   →  合并到 ~/.openclaw/openclaw.json（只添加缺失的 key）
+```
+
+**两种部署方式下的实现：**
+
+| 部署方式 | 实现文件 | 同步时机 |
+|---------|---------|---------|
+| `start_local.py` | `start_local.py` → `_sync_agents()` + `_sync_dir()` | Python 脚本启动时，直接操作本机文件系统 |
+| `deploy_docker.py` | `openclaw/bridge-entrypoint.sh` | 容器启动时，entrypoint 脚本从 `/deploy-copy/` 同步到 `$OPENCLAW_HOME` |
+
+**Agent 注册的关键步骤：**
+
+1. **创建 Agent 目录** — `~/.openclaw/agents/<id>/`（Gateway 通过扫描此目录发现 Agent）
+2. **同步工作空间** — `~/.openclaw/workspace-<id>/`（存放 SOUL.md、AGENTS.md 等文件）
+3. **写入配置** — `openclaw.json` 的 `agents.list[]` 中添加 `{id, name, workspace}`（API 返回 Agent 列表的数据源）
+
+> 如果只做了第 2 步但缺少第 1、3 步，Agent 不会在 Web UI 中显示。三步缺一不可。
+
+### 8.3 如何添加新的预置 Agent
+
+```bash
+# 1. 创建目录
+mkdir -p deploy_copy/Agents/my_agent
+
+# 2. 编写 Markdown 配置文件
+# SOUL.md — 定义 Agent 的身份、人格、核心原则
+# AGENTS.md — 定义行为规范、工具使用指南、输出格式
+# USER.md — 定义目标用户画像、交互偏好
+
+# 3. 重新部署
+python deploy_docker.py --host localhost        # Docker 方式
+# 或
+python start_local.py                           # 本地方式（会自动同步）
+```
+
+部署后访问 `http://localhost:3080/agents` 即可看到新 Agent。
+
+---
+
+## 9. 文件索引
+
+### 9.1 项目根目录
 
 ```
 项目根目录/
@@ -912,13 +995,13 @@ platform/
         └── admin.py                # 管理接口：用户列表、容器管理、系统状态
 ```
 
-### 8.4 前端 (`frontend/`)
+### 9.4 前端 (`frontend/`)
 
 详见 [第 7 节 前端](#7-前端) 的目录结构。
 
 ---
 
-## 9. API 调用示例
+## 10. API 调用示例
 
 通过 `call_agent_api.py` 脚本可以从命令行调用 Agent，适合外部系统集成。
 
