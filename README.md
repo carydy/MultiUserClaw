@@ -1042,6 +1042,8 @@ bridge、bridge-entrypoint.sh、bridge-package.json、bridge-deploy-copy、Docke
 5. 删除逐个确认 — 本地有但上游没有的文件，逐个询问是否删除
 6. dry-run 模式 — 用 --dry-run 只看差异不执行操作
 
+## 12. 如何配置Channel，打通QQ，飞书等
+https://zhuanlan.zhihu.com/p/2016049817437111235
 
 ## 📬 联系方式
 
