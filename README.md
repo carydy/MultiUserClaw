@@ -22,7 +22,7 @@ http://117.133.60.219:3080/login
   - frontend前端页面进行显示，调用platform进行交互, platform调用openclaw bridge对openclaw进行控制。
   - openclaw目录就是官方的openclaw，新建了1个openclaw/bridge作为中间层，对openclaw的控制。
   - 所以一共分有前端容器，platform容器，openclaw容器（包括bridge被platform控制，和控制openclaw）
-  - 如果要升级openclaw，只需要替换openclaw整个目录，注意保留bridge目录。
+  - 如果要升级openclaw，只需要替换openclaw整个目录，注意保留bridge目录，运行upgrade_openclaw.py文件。
 
 ## 目录
 
@@ -909,7 +909,7 @@ python start_local.py                           # 本地方式（会自动同步
 └── ssh_key/                        # SSH 密钥（远程部署用）
 ```
 
-### 8.2 OpenClaw Bridge 适配层 (`openclaw/bridge/`)
+### 9.2 OpenClaw Bridge 适配层 (`openclaw/bridge/`)
 
 Bridge 是连接平台和 OpenClaw 的关键中间层，在每个用户容器内运行。
 
@@ -948,7 +948,7 @@ openclaw/
         └── marketplaces.ts         # 技能市场：搜索和安装 skills.sh 上的技能
 ```
 
-### 8.3 Platform 多租户网关 (`platform/`)
+### 9.3 Platform 多租户网关 (`platform/`)
 
 Python FastAPI 应用，是整个平台的控制中心。
 
@@ -1021,6 +1021,28 @@ python call_agent_api.py --username admin --password admin123 --agent main --mes
 # 指定服务器地址
 python call_agent_api.py --base-url http://192.168.1.100:8080 --api-token "eyJ..." --agent main --message "hello"
 ```
+
+## 11. 一键升级openclaw
+* 预览变更（不实际执行）
+
+python upgrade_openclaw.py /Users/admin/git/openclaw --dry-run
+
+* 执行升级
+
+python upgrade_openclaw.py /Users/admin/git/openclaw
+
+核心功能：
+
+1. 升级前提醒 — 注意先 git commit 备份，检测未提交更改并警告
+2. 查看 .gitignore — 跳过 node_modules、dist、pnpm-lock.yaml 等忽略项
+3. 保护bridge文件 —
+bridge、bridge-entrypoint.sh、bridge-package.json、bridge-deploy-copy、Dockerfile.bridge、tsconfig.bridge.json
+不会被覆盖或删除
+4. 文件分类 — 分为新增、更新、待删除三类，先打印摘要再执行
+5. 删除逐个确认 — 本地有但上游没有的文件，逐个询问是否删除
+6. dry-run 模式 — 用 --dry-run 只看差异不执行操作
+
+
 ## 📬 联系方式
 
 如有问题，请联系作者：johnsongzc

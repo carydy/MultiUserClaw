@@ -18,7 +18,6 @@ import {
 import { parseDurationMs } from "../../cli/parse-duration.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { parsePreparedSystemRunPayload } from "../../infra/system-run-approval-context.js";
-import { formatExecCommand } from "../../infra/system-run-command.js";
 import { imageMimeFromFormat } from "../../media/mime.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
@@ -161,6 +160,7 @@ export function createNodesTool(options?: {
   currentThreadTs?: string | number;
   config?: OpenClawConfig;
   modelHasVision?: boolean;
+  allowMediaInvokeCommands?: boolean;
 }): AnyAgentTool {
   const sessionKey = options?.agentSessionKey?.trim() || undefined;
   const turnSourceChannel = options?.agentChannel?.trim() || undefined;
@@ -175,6 +175,7 @@ export function createNodesTool(options?: {
   return {
     label: "Nodes",
     name: "nodes",
+    ownerOnly: true,
     description:
       "Discover and control paired nodes (status/describe/pairing/notify/camera/photos/screen/location/notifications/run/invoke).",
     parameters: NodesToolSchema,
@@ -650,7 +651,6 @@ export function createNodesTool(options?: {
                 command: "system.run.prepare",
                 params: {
                   command,
-                  rawCommand: formatExecCommand(command),
                   cwd,
                   agentId,
                   sessionKey,
@@ -665,7 +665,7 @@ export function createNodesTool(options?: {
             }
             const runParams = {
               command: prepared.plan.argv,
-              rawCommand: prepared.plan.rawCommand ?? prepared.cmdText,
+              rawCommand: prepared.plan.commandText,
               cwd: prepared.plan.cwd ?? cwd,
               env,
               timeoutMs: commandTimeoutMs,
@@ -700,8 +700,6 @@ export function createNodesTool(options?: {
               { ...gatewayOpts, timeoutMs: APPROVAL_TIMEOUT_MS + 5_000 },
               {
                 id: approvalId,
-                command: prepared.cmdText,
-                commandArgv: prepared.plan.argv,
                 systemRunPlan: prepared.plan,
                 cwd: prepared.plan.cwd ?? cwd,
                 nodeId,
@@ -754,7 +752,7 @@ export function createNodesTool(options?: {
             const invokeCommandNormalized = invokeCommand.trim().toLowerCase();
             const dedicatedAction =
               MEDIA_INVOKE_ACTIONS[invokeCommandNormalized as keyof typeof MEDIA_INVOKE_ACTIONS];
-            if (dedicatedAction) {
+            if (dedicatedAction && !options?.allowMediaInvokeCommands) {
               throw new Error(
                 `invokeCommand "${invokeCommand}" returns media payloads and is blocked to prevent base64 context bloat; use action="${dedicatedAction}"`,
               );
