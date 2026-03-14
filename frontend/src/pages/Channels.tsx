@@ -328,7 +328,7 @@ export default function Channels() {
     setError('')
     try {
       const [statusResult, configuredResult] = await Promise.all([
-        getChannelsStatus(),
+        getChannelsStatus(true),
         getConfiguredChannels(),
       ])
       setStatus(statusResult)
@@ -635,7 +635,13 @@ export default function Channels() {
 // --- Sub components ---
 
 function AccountStatusBadge({ account }: { account: ChannelAccountSnapshot }) {
-  const isConnected = account.connected
+  const hasRecentTraffic = Boolean(account.lastInboundAt || account.lastOutboundAt)
+  const probeOk =
+    typeof account.probe === 'object' &&
+    account.probe !== null &&
+    'ok' in account.probe &&
+    (account.probe as { ok?: unknown }).ok === true
+  const isConnected = account.connected === true || hasRecentTraffic || probeOk
   const isRunning = account.running
   const hasError = !!account.lastError
 

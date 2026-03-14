@@ -8,7 +8,6 @@ import {
 } from 'lucide-react'
 import { fetchAgents, fetchDashboardStats } from '../store/agents'
 import type { BackendAgent, DashboardStats } from '../types/agent'
-import { useChat } from '../components/Layout'
 
 function StatCard({
   icon: Icon,
@@ -36,7 +35,6 @@ function StatCard({
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const { openChat } = useChat()
   const [agents, setAgents] = useState<BackendAgent[]>([])
   const [stats, setStats] = useState<DashboardStats>({ totalAgents: 0, totalSessions: 0, totalSkills: 0 })
   const [loading, setLoading] = useState(true)
@@ -124,25 +122,12 @@ export default function Dashboard() {
                   {agent.id}
                 </td>
                 <td className="px-4 py-4 text-center">
-                  <div className="flex items-center justify-center gap-2">
-                    <button
-                      onClick={() => openChat({
-                        agentId: agent.id,
-                        agentName: agent.name || agent.identity?.name || agent.id,
-                        agentEmoji: agent.identity?.emoji,
-                      })}
-                      className="rounded-lg border border-dark-border px-3 py-1 text-xs text-accent-blue hover:bg-accent-blue/10 transition-colors"
-                      title="对话"
-                    >
-                      <MessageSquare size={14} />
-                    </button>
                     <button
                       onClick={() => navigate(`/agents/${agent.id}`)}
                       className="rounded-lg border border-dark-border px-3 py-1 text-xs text-dark-text-secondary hover:bg-dark-card-hover hover:text-dark-text transition-colors"
                     >
                       查看
                     </button>
-                  </div>
                 </td>
               </tr>
             ))}

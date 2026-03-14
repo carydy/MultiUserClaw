@@ -61,17 +61,40 @@ export function agentsRoutes(client: BridgeGatewayClient): Router {
   // DELETE /api/agents/:agentId — delete agent
   router.delete("/agents/:agentId", asyncHandler(async (req, res) => {
     const deleteFiles = req.query.delete_files === "true";
+    const agentId = req.params.agentId;
 
     try {
       await client.request("agents.delete", {
-        agentId: req.params.agentId,
+        agentId,
         deleteFiles,
       });
       res.json({ ok: true });
     } catch (err) {
       const msg = (err as Error).message;
       if (msg.includes("not found")) {
-        res.status(404).json({ detail: "Agent not found" });
+        // Gateway only knows about agents in openclaw.json config, but agents
+        // can also be discovered from disk (workspace-<id> directories).
+        // If the gateway says "not found", try to clean up the disk-only agent.
+        const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+        const workspaceDir = path.join(openclawHome, `workspace-${agentId}`);
+        const agentDir = path.join(openclawHome, "agents", agentId);
+        let cleaned = false;
+
+        for (const dir of [workspaceDir, agentDir]) {
+          try {
+            await fs.promises.access(dir);
+            await fs.promises.rm(dir, { recursive: true, force: true });
+            cleaned = true;
+          } catch {
+            // Directory doesn't exist or can't be removed — skip
+          }
+        }
+
+        if (cleaned) {
+          res.json({ ok: true, diskOnly: true });
+        } else {
+          res.status(404).json({ detail: "Agent not found" });
+        }
       } else {
         res.status(500).json({ detail: msg });
       }

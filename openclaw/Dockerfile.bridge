@@ -24,6 +24,10 @@ RUN cd bridge && npx tsc -p /app/tsconfig.bridge.json
 
 WORKDIR /app
 
+# Copy deploy templates (workspace, skills, config defaults)
+# bridge-deploy-copy/ is already inside /app from COPY . . above
+RUN if [ -d /app/bridge-deploy-copy ]; then cp -r /app/bridge-deploy-copy /deploy-copy; else mkdir -p /deploy-copy; fi
+
 EXPOSE 18080 18789
 
 COPY bridge-entrypoint.sh /entrypoint.sh

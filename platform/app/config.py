@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     moonshot_api_key: str = ""
     kimi_api_key: str = ""
     zhipu_api_key: str = ""
+    doubao_api_key: str = ""
 
     # Self-hosted vLLM / OpenAI-compatible local model
     hosted_vllm_api_key: str = ""

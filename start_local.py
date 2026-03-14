@@ -8,7 +8,7 @@
   4. frontend dev server (端口 3080)
 
 用法:
-  # 启动所有服务
+  # 启动所有服务（默认局域网可访问）
   python start_local.py
 
   # 仅启动部分服务
@@ -19,12 +19,20 @@
 
   # 停止所有服务
   python start_local.py --stop
+
+  # 强制仅本机访问
+  python start_local.py --local-only
+
+  # 手动指定 API 地址（如远程服务器）
+  python start_local.py --api-url http://192.168.1.100:8080
 """
 
 import argparse
+import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -115,6 +123,42 @@ def _base_env(**extra) -> dict:
     return env
 
 
+def _detect_lan_ip() -> str:
+    """尽力探测当前机器的局域网 IP（失败时回退 127.0.0.1）。
+
+    跳过 VPN/代理隧道接口（utun 等）返回的 IP，这些 IP 虽然是出口地址，
+    但其他局域网设备无法直接连接。
+    """
+    # 已知的 VPN/隧道 IP 段（198.18.0.0/15 是 Surge/ClashX 等代理工具常用的）
+    _TUNNEL_PREFIXES = ("198.18.", "198.19.", "100.64.")
+
+    # 方式1：先尝试 UDP 探测，但要过滤隧道 IP
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not any(ip.startswith(p) for p in _TUNNEL_PREFIXES):
+                return ip
+    except OSError:
+        pass
+
+    # 方式2：遍历网卡，找到真实的局域网 IP（macOS / Linux）
+    try:
+        import subprocess as _sp
+        result = _sp.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            import re
+            for match in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)", result.stdout):
+                addr = match.group(1)
+                if (addr.startswith(("192.168.", "10.", "172."))
+                        and not any(addr.startswith(p) for p in _TUNNEL_PREFIXES)):
+                    return addr
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
 # ── PostgreSQL ────────────────────────────────────────────────────────
 
 def start_postgres() -> bool:
@@ -187,23 +231,124 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
         else:
             cmd = ["node", "bridge/dist/start.js"]
 
+    # 本地开发模式：启用渠道（飞书、Telegram 等），不跳过
+    bridge_env = _base_env(BRIDGE_ENABLE_CHANNELS="1", **env)
+
     proc = subprocess.Popen(
         cmd,
         cwd=bridge_dir,
-        env=_base_env(**env),
+        env=bridge_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
     log(f"  PID: {proc.pid}")
 
-    # 等待就绪再启动 gateway，避免 gateway 代理时返回 503
-    # 首次启动可能需要编译 openclaw（较慢），后续启动会快很多
-    if wait_for_port(18080, timeout=120, name="OpenClaw Bridge"):
-        success("OpenClaw Bridge 就绪 (端口 18080)")
-    else:
-        warn("OpenClaw Bridge 尚未就绪（首次启动需要编译 openclaw），继续启动其他服务")
+    # 等待就绪，同时实时显示 bridge 输出以便诊断问题
+    timeout = 120
+    output_lines: list[str] = []
+    bridge_color = SERVICES["bridge"]["color"]
 
+    for elapsed in range(1, timeout + 1):
+        # 读取所有可用的输出（非阻塞）
+        _drain_output(proc, output_lines, bridge_color)
+
+        # 检查进程是否已退出
+        if proc.poll() is not None:
+            # 进程已退出，读取剩余输出
+            _drain_output(proc, output_lines, bridge_color)
+            exit_code = proc.returncode
+            error(f"OpenClaw Bridge 启动失败 (exit code: {exit_code})")
+            if output_lines:
+                # 显示最后几行错误信息
+                print()
+                last_lines = output_lines[-15:]
+                for line in last_lines:
+                    print(f"  {RED}│{RESET} {line}")
+                print()
+            _suggest_bridge_fix(output_lines)
+            return None
+
+        if is_port_in_use(18080):
+            success("OpenClaw Bridge 就绪 (端口 18080)")
+            return proc
+
+        # 进度提示
+        if elapsed % 10 == 0:
+            if elapsed <= 30:
+                hint = "正在启动..."
+            elif elapsed <= 60:
+                hint = "首次启动需要编译 openclaw..."
+            else:
+                hint = "编译时间较长，请耐心等待..."
+            sys.stdout.write(f"\r  等待 OpenClaw Bridge... ({elapsed}/{timeout}s) {DIM}{hint}{RESET}  ")
+            sys.stdout.flush()
+
+    print()
+    # 超时
+    _drain_output(proc, output_lines, bridge_color)
+    warn("OpenClaw Bridge 启动超时 (120s)，继续启动其他服务")
+    if output_lines:
+        print(f"  {DIM}最近输出:{RESET}")
+        for line in output_lines[-5:]:
+            print(f"  {YELLOW}│{RESET} {line}")
+        print()
     return proc
+
+
+def _drain_output(proc: "subprocess.Popen", lines: list, color: str):
+    """非阻塞地读取进程输出并显示。"""
+    if proc.stdout is None:
+        return
+
+    if IS_WINDOWS:
+        # Windows: 在单独线程中读取（简单回退）
+        return
+
+    import select as _select
+    try:
+        while True:
+            ready, _, _ = _select.select([proc.stdout], [], [], 0)
+            if not ready:
+                break
+            raw = proc.stdout.readline()
+            if not raw:
+                break
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if text:
+                lines.append(text)
+                print(f"  {color}[bridge]{RESET} {text}", flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _suggest_bridge_fix(output_lines: list):
+    """根据错误输出给出修复建议。"""
+    combined = "\n".join(output_lines[-30:]).lower()
+
+    suggestions = []
+    if "cannot find module" in combined or "module not found" in combined:
+        suggestions.append("尝试运行: cd openclaw && pnpm install")
+    if "eaddrinuse" in combined or "address already in use" in combined:
+        suggestions.append("端口被占用，尝试: lsof -ti:18080 | xargs kill 或 lsof -ti:18789 | xargs kill")
+    if "econnrefused" in combined and "5432" in combined:
+        suggestions.append("PostgreSQL 未就绪，确认 Docker 容器正在运行")
+    if "tsx" in combined and ("not found" in combined or "enoent" in combined):
+        suggestions.append("tsx 未安装，尝试: npm install -g tsx")
+    if "permission denied" in combined:
+        suggestions.append("权限不足，检查文件权限")
+    if "syntaxerror" in combined or "typeerror" in combined:
+        suggestions.append("代码错误，检查 openclaw/bridge/ 下的源码")
+    if "proxy" in combined and ("econnrefused" in combined or "connect" in combined):
+        suggestions.append("LLM 代理连接失败，检查 .env 中的 API Key 配置")
+
+    if not suggestions:
+        suggestions.append("查看上方日志了解详情")
+        suggestions.append("尝试手动运行: cd openclaw && npx tsx bridge/start.ts")
+
+    print(f"  {YELLOW}💡 可能的解决方法:{RESET}")
+    for s in suggestions:
+        print(f"     • {s}")
+    print()
 
 
 # ── Platform Gateway ──────────────────────────────────────────────────
@@ -248,12 +393,35 @@ def start_gateway(env: dict) -> "subprocess.Popen | None":
         stderr=subprocess.STDOUT,
     )
     log(f"  PID: {proc.pid}")
+
+    # 短暂等待，检查是否立即崩溃（如依赖缺失、配置错误）
+    time.sleep(2)
+    if proc.poll() is not None:
+        error(f"Platform Gateway 启动失败 (exit code: {proc.returncode})")
+        if proc.stdout:
+            raw = proc.stdout.read()
+            if raw:
+                text = raw.decode("utf-8", errors="replace").strip()
+                output_lines = text.splitlines()
+                last = output_lines[-10:]
+                print()
+                for line in last:
+                    print(f"  {RED}│{RESET} {line}")
+                print()
+                combined = "\n".join(output_lines[-20:]).lower()
+                if "no module named" in combined:
+                    print(f"  {YELLOW}💡 Python 依赖缺失，尝试: cd platform && pip install -r requirements.txt{RESET}")
+                elif "connection refused" in combined and "5432" in combined:
+                    print(f"  {YELLOW}💡 数据库连接失败，确认 PostgreSQL 正在运行{RESET}")
+                print()
+        return None
+
     return proc
 
 
 # ── Frontend Dev Server ───────────────────────────────────────────────
 
-def start_frontend() -> "subprocess.Popen | None":
+def start_frontend(frontend_host: str = "0.0.0.0", api_url: str = "http://127.0.0.1:8080") -> "subprocess.Popen | None":
     log("启动 Frontend Dev Server (端口 3080)...")
 
     if is_port_in_use(3080):
@@ -267,10 +435,12 @@ def start_frontend() -> "subprocess.Popen | None":
         # shell=True + 字符串命令在两个平台都能正确找到 npm / npm.cmd
         subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True)
 
+    # 让 vite 明确绑定到指定网卡，支持其他设备访问
+    dev_cmd = f"npm run dev -- --host {frontend_host} --port 3080"
     proc = subprocess.Popen(
-        "npm run dev",
+        dev_cmd,
         cwd=frontend_dir,
-        env=_base_env(VITE_API_URL="http://127.0.0.1:8080"),
+        env=_base_env(VITE_API_URL=api_url),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         shell=True,
@@ -373,6 +543,180 @@ def _stop_all_windows():
             pass
 
 
+# ── deploy_copy 同步 ─────────────────────────────────────────────────
+
+def sync_deploy_copy():
+    """将 deploy_copy 目录中的模板文件同步到 ~/.openclaw/。
+
+    仅在目标文件不存在时复制（不覆盖用户已有配置）。
+    openclaw_defaults.json 中的配置项会合并到 openclaw.json（不覆盖已有项）。
+    Agents/ 目录下的每个子目录会被注册为独立 Agent（创建 agents 目录 + workspace + 配置）。
+    """
+    deploy_dir = os.path.join(PROJECT_DIR, "deploy_copy")
+    if not os.path.isdir(deploy_dir):
+        return
+
+    openclaw_home = os.path.join(os.path.expanduser("~"), ".openclaw")
+    log("同步 deploy_copy 模板文件...")
+
+    copied = 0
+
+    # 1. 同步 Agents/ 目录 — 每个子目录注册为独立 Agent
+    src_agents = os.path.join(deploy_dir, "Agents")
+    if os.path.isdir(src_agents):
+        copied += _sync_agents(src_agents, openclaw_home)
+
+    # 2. 同步 skills/ 目录
+    src_skills = os.path.join(deploy_dir, "skills")
+    dst_skills = os.path.join(openclaw_home, "skills")
+    if os.path.isdir(src_skills):
+        os.makedirs(dst_skills, exist_ok=True)
+        copied += _sync_dir(src_skills, dst_skills)
+
+    # 3. 合并 openclaw_defaults.json 到 openclaw.json
+    defaults_path = os.path.join(deploy_dir, "openclaw_defaults.json")
+    config_path = os.path.join(openclaw_home, "openclaw.json")
+    if os.path.isfile(defaults_path):
+        _merge_openclaw_defaults(defaults_path, config_path)
+
+    if copied > 0:
+        success(f"同步了 {copied} 个模板文件到 ~/.openclaw/")
+    else:
+        success("deploy_copy 模板已就绪（无新文件需同步）")
+
+
+def _sync_agents(src_agents_dir: str, openclaw_home: str) -> int:
+    """将 deploy_copy/Agents/ 下的每个子目录注册为独立 Agent。
+
+    对每个 agent（如 hr, researcher, programmer）：
+    1. 创建 ~/.openclaw/agents/<name>/ 目录（供 gateway 磁盘发现）
+    2. 创建 ~/.openclaw/workspace-<name>/ 并同步 SOUL.md 等工作区文件
+    3. 在 openclaw.json 的 agents.list 中注册（workspace 路径 + 名称）
+    """
+    copied = 0
+    config_path = os.path.join(openclaw_home, "openclaw.json")
+    agents_to_register = []
+
+    for entry in sorted(os.listdir(src_agents_dir)):
+        src_agent = os.path.join(src_agents_dir, entry)
+        if not os.path.isdir(src_agent):
+            continue
+
+        agent_id = entry.lower()
+
+        # 1. 创建 agents/<id>/ 目录（gateway 会扫描此目录发现 agent）
+        agent_dir = os.path.join(openclaw_home, "agents", agent_id)
+        os.makedirs(agent_dir, exist_ok=True)
+
+        # 2. 同步工作区文件到 workspace-<id>/
+        workspace_dir = os.path.join(openclaw_home, f"workspace-{agent_id}")
+        os.makedirs(workspace_dir, exist_ok=True)
+        copied += _sync_dir(src_agent, workspace_dir)
+
+        # 3. 记录待注册的 agent
+        agents_to_register.append({
+            "id": agent_id,
+            "name": entry,
+            "workspace": workspace_dir,
+        })
+
+    # 批量注册到 openclaw.json
+    if agents_to_register:
+        _register_agents_in_config(config_path, agents_to_register)
+
+    return copied
+
+
+def _register_agents_in_config(config_path: str, agents: list):
+    """将 agent 列表注册到 openclaw.json 的 agents.list 中（不覆盖已有条目）。"""
+    if not os.path.isfile(config_path):
+        return
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    if "agents" not in config:
+        config["agents"] = {}
+    if "list" not in config["agents"]:
+        config["agents"]["list"] = []
+
+    existing_ids = {
+        entry.get("id", "").lower()
+        for entry in config["agents"]["list"]
+        if isinstance(entry, dict)
+    }
+
+    changed = False
+    for agent in agents:
+        if agent["id"] not in existing_ids:
+            config["agents"]["list"].append({
+                "id": agent["id"],
+                "name": agent["name"],
+                "workspace": agent["workspace"],
+            })
+            log(f"  注册 Agent: {agent['name']} (workspace: ~/{os.path.relpath(agent['workspace'], os.path.expanduser('~'))})")
+            changed = True
+
+    if changed:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def _sync_dir(src: str, dst: str) -> int:
+    """递归同步目录，仅复制目标不存在的文件。返回复制的文件数。"""
+    copied = 0
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        dst_root = os.path.join(dst, rel) if rel != "." else dst
+        os.makedirs(dst_root, exist_ok=True)
+        for f in files:
+            src_file = os.path.join(root, f)
+            dst_file = os.path.join(dst_root, f)
+            if not os.path.exists(dst_file):
+                shutil.copy2(src_file, dst_file)
+                log(f"  + {os.path.relpath(dst_file, os.path.expanduser('~'))}")
+                copied += 1
+    return copied
+
+
+def _merge_openclaw_defaults(defaults_path: str, config_path: str):
+    """将 defaults 中的配置项浅合并到 openclaw.json（不覆盖已有顶层 key）。"""
+    try:
+        with open(defaults_path) as f:
+            defaults = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    if not os.path.isfile(config_path):
+        return
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    changed = False
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = value
+            changed = True
+        elif isinstance(value, dict) and isinstance(config[key], dict):
+            # 二级合并：仅添加不存在的子 key
+            for sub_key, sub_value in value.items():
+                if sub_key not in config[key]:
+                    config[key][sub_key] = sub_value
+                    changed = True
+
+    if changed:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        log("  合并 openclaw_defaults.json → openclaw.json")
+
+
 # ── 主入口 ────────────────────────────────────────────────────────────
 
 def main():
@@ -381,6 +725,28 @@ def main():
     parser.add_argument("--only", type=str, help="仅启动指定服务，逗号分隔 (db,bridge,gateway,frontend)")
     parser.add_argument("--skip", type=str, help="跳过指定服务，逗号分隔")
     parser.add_argument("--no-tail", action="store_true", help="不跟踪日志输出")
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help="开启局域网访问（frontend 绑定 0.0.0.0，并自动使用本机 LAN IP 作为 API 地址）",
+    )
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="强制仅本机访问（frontend 绑定 127.0.0.1，API 使用 127.0.0.1）",
+    )
+    parser.add_argument(
+        "--frontend-host",
+        type=str,
+        default="",
+        help="前端 dev server 绑定地址（默认自动 0.0.0.0，可手动指定）",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default="",
+        help="前端访问的 Gateway 地址（默认自动使用探测到的局域网 IP）",
+    )
     args = parser.parse_args()
 
     if args.stop:
@@ -396,6 +762,37 @@ def main():
 
     platform_label = "Windows" if IS_WINDOWS else ("macOS" if sys.platform == "darwin" else "Linux")
     print(f"\n{BOLD}🔧 OpenClaw 本地开发环境 ({platform_label}){RESET}\n")
+
+    # 同步 deploy_copy 模板文件到 ~/.openclaw/, 用于部署时初始化，方便新用户不必每次都安装
+    sync_deploy_copy()
+    print()
+
+    # ── 网络模式 ──────────────────────────────────────────────────────
+    lan_ip = _detect_lan_ip()
+
+    # 前端监听地址：手动指定 > local-only > 默认公网友好(0.0.0.0)
+    if args.frontend_host:
+        frontend_host = args.frontend_host
+    elif args.local_only:
+        frontend_host = "127.0.0.1"
+    else:
+        frontend_host = "0.0.0.0"
+
+    # 前端 API 地址：手动指定 > local-only > 默认使用探测 LAN IP
+    if args.api_url:
+        frontend_api_url = args.api_url.rstrip("/")
+    elif args.local_only:
+        frontend_api_url = "http://127.0.0.1:8080"
+    else:
+        frontend_api_url = f"http://{lan_ip}:8080"
+
+    # 启动前打印网络模式与 IP 探测结果，便于排障
+    log(f"探测到局域网 IP: {lan_ip}")
+    mode_label = "局域网可访问" if not args.local_only else "仅本机访问"
+    log(f"访问模式: {mode_label}")
+    if lan_ip == "127.0.0.1" and not args.local_only:
+        warn("未探测到有效局域网 IP，已回退到 127.0.0.1；如需外部访问请手动指定 --api-url")
+
     log(f"启动服务: {', '.join(enabled)}")
 
     processes: dict = {}
@@ -444,7 +841,7 @@ def main():
 
         # 4. Frontend
         if "frontend" in enabled:
-            proc = start_frontend()
+            proc = start_frontend(frontend_host=frontend_host, api_url=frontend_api_url)
             if proc:
                 processes["frontend"] = proc
 
@@ -453,6 +850,7 @@ def main():
             return
 
         # 打印访问信息
+        display_host = "127.0.0.1" if args.local_only else lan_ip
         print(f"\n{BOLD}{'=' * 52}{RESET}")
         print(f"{BOLD}  本地开发环境已启动{RESET}")
         print(f"{'=' * 52}")
@@ -464,7 +862,11 @@ def main():
                 pid_info = f"PID {processes[svc_id].pid}"
             else:
                 pid_info = "已有实例"
-            print(f"  {svc['color']}{svc['name']:>20}{RESET}  http://127.0.0.1:{svc['port']}  ({pid_info})")
+            print(f"  {svc['color']}{svc['name']:>20}{RESET}  http://{display_host}:{svc['port']}  ({pid_info})")
+        if "frontend" in enabled:
+            print(f"  {DIM}Frontend 绑定: {frontend_host} | VITE_API_URL={frontend_api_url}{RESET}")
+        if not args.local_only and lan_ip != "127.0.0.1":
+            print(f"  {DIM}局域网访问: http://{lan_ip}:3080{RESET}")
         print(f"{'=' * 52}")
         print(f"  {DIM}按 Ctrl+C 停止所有服务{RESET}\n")
 

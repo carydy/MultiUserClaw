@@ -1,6 +1,7 @@
 // API client for OpenClaw Platform Gateway (multi-tenant mode)
 
-const API_URL = import.meta.env.VITE_API_URL || ''
+// Always use relative URL to go through Vite proxy, avoiding CORS preflight
+const API_URL = ''
 
 // ---------------------------------------------------------------------------
 // Types

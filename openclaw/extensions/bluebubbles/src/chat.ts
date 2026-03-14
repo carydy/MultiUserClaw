@@ -26,8 +26,44 @@ function assertPrivateApiEnabled(accountId: string, feature: string): void {
   }
 }
 
+async function assertBlueBubblesActionOk(response: Response, action: string): Promise<void> {
+  if (response.ok) {
+    return;
+  }
+  const errorText = await response.text().catch(() => "");
+  throw new Error(`BlueBubbles ${action} failed (${response.status}): ${errorText || "unknown"}`);
+}
+
 function resolvePartIndex(partIndex: number | undefined): number {
   return typeof partIndex === "number" ? partIndex : 0;
+}
+
+async function sendBlueBubblesChatEndpointRequest(params: {
+  chatGuid: string;
+  opts: BlueBubblesChatOpts;
+  endpoint: "read" | "typing";
+  method: "POST" | "DELETE";
+  action: "read" | "typing";
+}): Promise<void> {
+  const trimmed = params.chatGuid.trim();
+  if (!trimmed) {
+    return;
+  }
+  const { baseUrl, password, accountId } = resolveAccount(params.opts);
+  if (getCachedBlueBubblesPrivateApiStatus(accountId) === false) {
+    return;
+  }
+  const url = buildBlueBubblesApiUrl({
+    baseUrl,
+    path: `/api/v1/chat/${encodeURIComponent(trimmed)}/${params.endpoint}`,
+    password,
+  });
+  const res = await blueBubblesFetchWithTimeout(
+    url,
+    { method: params.method },
+    params.opts.timeoutMs,
+  );
+  await assertBlueBubblesActionOk(res, params.action);
 }
 
 async function sendPrivateApiJsonRequest(params: {
@@ -53,36 +89,20 @@ async function sendPrivateApiJsonRequest(params: {
   }
 
   const res = await blueBubblesFetchWithTimeout(url, request, params.opts.timeoutMs);
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => "");
-    throw new Error(
-      `BlueBubbles ${params.action} failed (${res.status}): ${errorText || "unknown"}`,
-    );
-  }
+  await assertBlueBubblesActionOk(res, params.action);
 }
 
 export async function markBlueBubblesChatRead(
   chatGuid: string,
   opts: BlueBubblesChatOpts = {},
 ): Promise<void> {
-  const trimmed = chatGuid.trim();
-  if (!trimmed) {
-    return;
-  }
-  const { baseUrl, password, accountId } = resolveAccount(opts);
-  if (getCachedBlueBubblesPrivateApiStatus(accountId) === false) {
-    return;
-  }
-  const url = buildBlueBubblesApiUrl({
-    baseUrl,
-    path: `/api/v1/chat/${encodeURIComponent(trimmed)}/read`,
-    password,
+  await sendBlueBubblesChatEndpointRequest({
+    chatGuid,
+    opts,
+    endpoint: "read",
+    method: "POST",
+    action: "read",
   });
-  const res = await blueBubblesFetchWithTimeout(url, { method: "POST" }, opts.timeoutMs);
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => "");
-    throw new Error(`BlueBubbles read failed (${res.status}): ${errorText || "unknown"}`);
-  }
 }
 
 export async function sendBlueBubblesTyping(
@@ -90,28 +110,13 @@ export async function sendBlueBubblesTyping(
   typing: boolean,
   opts: BlueBubblesChatOpts = {},
 ): Promise<void> {
-  const trimmed = chatGuid.trim();
-  if (!trimmed) {
-    return;
-  }
-  const { baseUrl, password, accountId } = resolveAccount(opts);
-  if (getCachedBlueBubblesPrivateApiStatus(accountId) === false) {
-    return;
-  }
-  const url = buildBlueBubblesApiUrl({
-    baseUrl,
-    path: `/api/v1/chat/${encodeURIComponent(trimmed)}/typing`,
-    password,
+  await sendBlueBubblesChatEndpointRequest({
+    chatGuid,
+    opts,
+    endpoint: "typing",
+    method: typing ? "POST" : "DELETE",
+    action: "typing",
   });
-  const res = await blueBubblesFetchWithTimeout(
-    url,
-    { method: typing ? "POST" : "DELETE" },
-    opts.timeoutMs,
-  );
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => "");
-    throw new Error(`BlueBubbles typing failed (${res.status}): ${errorText || "unknown"}`);
-  }
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   X,
   FileText,
 } from 'lucide-react'
+import MarkdownContent from '../components/MarkdownContent'
 import {
   listSessions,
   getSession,
@@ -77,6 +78,43 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+  // Typewriter streaming: targetText is the full text from SSE, displayedText is what's shown
+  const [displayedText, setDisplayedText] = useState('')
+  const targetTextRef = useRef('')
+  const typewriterTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const setStreamingText = useCallback((text: string) => {
+    if (!text) {
+      // Clear everything
+      targetTextRef.current = ''
+      setDisplayedText('')
+      if (typewriterTimerRef.current) {
+        clearInterval(typewriterTimerRef.current)
+        typewriterTimerRef.current = null
+      }
+      return
+    }
+    targetTextRef.current = text
+    // Start typewriter if not already running
+    if (!typewriterTimerRef.current) {
+      typewriterTimerRef.current = setInterval(() => {
+        setDisplayedText(prev => {
+          const target = targetTextRef.current
+          if (prev.length >= target.length) {
+            // Caught up — stop timer
+            if (typewriterTimerRef.current) {
+              clearInterval(typewriterTimerRef.current)
+              typewriterTimerRef.current = null
+            }
+            return target
+          }
+          // Reveal 2-4 characters per tick for natural speed
+          const charsToAdd = Math.min(3, target.length - prev.length)
+          return target.substring(0, prev.length + charsToAdd)
+        })
+      }, 20) // ~50fps, 3 chars per tick ≈ 150 chars/sec
+    }
+  }, [])
 
   // Files
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
@@ -98,7 +136,7 @@ export default function Chat() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messages, displayedText, scrollToBottom])
 
   // Load sessions
   const fetchSessions = useCallback(async () => {
@@ -286,6 +324,7 @@ export default function Chat() {
       })
       setPendingFiles([])
 
+      setStreamingText('')
       await sendChatMessage(activeSessionKey, finalMessage)
 
       // Wait for response (WebSocket for completion signal + polling for intermediate updates)
@@ -298,173 +337,152 @@ export default function Chat() {
     }
   }
 
-  // WebSocket connection for real-time chat events
-  const wsRef = useRef<WebSocket | null>(null)
-  const wsReadyRef = useRef(false)
-  const wsCompletedRef = useRef(false)
-  const wsFinalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // SSE connection for real-time chat events (replaces WebSocket)
+  const sseRef = useRef<EventSource | null>(null)
+  const sseCompletedRef = useRef(false)
+  const sseFinalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const connectWs = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return
-
-    const token = getAccessToken()
-    if (!token) return
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const ws = new WebSocket(`${protocol}//${host}/api/openclaw/ws?token=${token}`)
-    wsRef.current = ws
-    wsReadyRef.current = false
-
-    ws.onopen = () => {
-      // Wait for connect.challenge, then send connect handshake
+  const handleChatEvent = useCallback((payload: any) => {
+    const { state, sessionKey } = payload
+    const currentKey = activeSessionKeyRef.current
+    console.log('[SSE] handleChatEvent:', { state, sessionKey, currentKey })
+    if (!sessionKey || !currentKey) {
+      console.log('[SSE] 跳过: sessionKey或currentKey为空')
+      return
     }
 
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data)
+    const normalizedGw = sessionKey.replace(/:/g, '')
+    const normalizedActive = currentKey.replace(/:/g, '')
+    const isCurrentSession = normalizedGw === normalizedActive || sessionKey === currentKey
+    console.log('[SSE] session匹配:', { normalizedGw, normalizedActive, isCurrentSession })
+    if (!isCurrentSession) return
 
-        // Gateway sends connect.challenge first — respond with connect request
-        if (msg.type === 'event' && msg.event === 'connect.challenge') {
-          ws.send(JSON.stringify({
-            type: 'req',
-            id: 'c1',
-            method: 'connect',
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: {
-                id: 'gateway-client',
-                mode: 'backend',
-                displayName: 'nanobot-web',
-                version: '1.0',
-                platform: 'web',
-              },
-              role: 'operator',
-              scopes: [],
-            },
-          }))
-          return
+    // Streaming delta — extract text and update incrementally
+    if (state === 'delta' && payload.message) {
+      const content = payload.message.content
+      console.log('[SSE] delta内容:', JSON.stringify(content)?.substring(0, 200))
+      if (Array.isArray(content)) {
+        const textPart = content.find((c: any) => c.type === 'text')
+        if (textPart?.text) {
+          setStreamingText(textPart.text)
         }
-
-        // Connect response
-        if (msg.type === 'res' && msg.id === 'c1') {
-          wsReadyRef.current = msg.ok === true
-          return
-        }
-
-        // Chat event — agent turn completion signal
-        // Agent may have multiple turns (tool call → response → tool call → response),
-        // each producing a "final" event. Use debounce: refresh messages on every "final",
-        // but only mark truly completed after 10s of no new "final" events.
-        if (msg.type === 'event' && msg.event === 'chat' && msg.payload) {
-          const { state, sessionKey } = msg.payload
-          if (state === 'final' || state === 'error' || state === 'aborted') {
-            const currentKey = activeSessionKeyRef.current
-            if (sessionKey && currentKey) {
-              const normalizedGw = sessionKey.replace(/:/g, '')
-              const normalizedActive = currentKey.replace(/:/g, '')
-              if (normalizedGw === normalizedActive || sessionKey === currentKey) {
-                // Refresh messages immediately (show latest replies in real-time)
-                getSession(currentKey).then(detail => {
-                  setMessages(detail.messages || [])
-                }).catch(() => {})
-
-                // Debounce: reset the completion timer on every "final"
-                if (wsFinalTimerRef.current) clearTimeout(wsFinalTimerRef.current)
-                wsFinalTimerRef.current = setTimeout(() => {
-                  // No new "final" events for 10s — agent is truly done
-                  wsCompletedRef.current = true
-                  getSession(currentKey).then(detail => {
-                    setMessages(detail.messages || [])
-                    setSending(false)
-                    fetchSessions()
-                  }).catch(() => {})
-                }, 10000)
-              }
-            }
-          }
-        }
-      } catch {
-        // ignore parse errors
+      } else if (typeof content === 'string') {
+        setStreamingText(content)
       }
+      return
     }
 
-    ws.onclose = () => {
-      wsRef.current = null
-      wsReadyRef.current = false
-      // Auto-reconnect after 3 seconds
-      setTimeout(connectWs, 3000)
+    // Started — clear streaming text for new turn
+    if (state === 'started') {
+      setStreamingText('')
+      return
     }
 
-    ws.onerror = () => {
-      // onclose will fire after this
+    // Final / error / aborted — load final messages, THEN clear streaming
+    if (state === 'final' || state === 'error' || state === 'aborted') {
+      // Don't clear streamingText yet — keep it visible until messages load
+
+      // Debounce: reset the completion timer on every "final"
+      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
+      sseFinalTimerRef.current = setTimeout(() => {
+        // No new "final" events for 3s — agent is truly done
+        getSession(currentKey).then(detail => {
+          setMessages(detail.messages || [])
+          setStreamingText('')
+          setSending(false)
+          sseCompletedRef.current = true
+          fetchSessions()
+        }).catch(() => {
+          setStreamingText('')
+          setSending(false)
+          sseCompletedRef.current = true
+        })
+      }, 3000)
     }
   }, [fetchSessions])
 
-  // Connect WebSocket on mount
+  // Connect SSE on mount
   useEffect(() => {
-    connectWs()
-    return () => {
-      if (wsFinalTimerRef.current) clearTimeout(wsFinalTimerRef.current)
-      if (wsRef.current) {
-        wsRef.current.onclose = null // prevent auto-reconnect on unmount
-        wsRef.current.close()
-        wsRef.current = null
-      }
+    console.log('[SSE] useEffect 触发')
+    const token = getAccessToken()
+    if (!token) {
+      console.log('[SSE] 没有token，跳过SSE连接')
+      return
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Always use relative URL so SSE goes through Vite proxy, avoiding CORS issues
+    const url = `/api/openclaw/events/stream?token=${encodeURIComponent(token)}`
+    console.log('[SSE] 正在连接:', url)
+    const sse = new EventSource(url)
+    sseRef.current = sse
 
-  const waitForResponse = async (key: string, minMessages: number) => {
-    // Poll for intermediate messages while WebSocket listens for completion.
-    // WebSocket sets wsCompletedRef=true + setSending(false) on state="final".
-    // Polling acts as fallback if WebSocket is not connected.
-    wsCompletedRef.current = false
-    const maxAttempts = 120
-    const interval = 2000
-    const stableThresholdMs = 15000
+    sse.onopen = () => {
+      console.log('[SSE] 连接成功')
+    }
 
-    let lastCount = minMessages
-    let lastChangeTime = Date.now()
-    let hasAssistantReply = false
-
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise(r => setTimeout(r, interval))
-
-      // WebSocket already signaled completion
-      if (wsCompletedRef.current) return
-
-      if (key !== activeSessionKeyRef.current) return
-
+    sse.onmessage = (evt) => {
+      console.log('[SSE] 收到消息:', evt.data?.substring(0, 100))
       try {
-        const detail = await getSession(key)
-        const msgs = detail.messages || []
-
-        if (msgs.length > minMessages) {
-          setMessages(msgs)
-          hasAssistantReply = msgs.some(
-            (m, idx) => idx >= minMessages && m.role === 'assistant'
-          )
-        }
-
-        if (msgs.length !== lastCount) {
-          lastCount = msgs.length
-          lastChangeTime = Date.now()
-        }
-
-        // Stable timeout fallback (in case WS is not connected)
-        if (hasAssistantReply && (Date.now() - lastChangeTime) >= stableThresholdMs) {
-          return
+        const msg = JSON.parse(evt.data)
+        if (msg.event === 'chat' && msg.payload) {
+          handleChatEvent(msg.payload)
         }
       } catch {
-        // continue
+        // ignore
       }
     }
 
+    sse.onerror = (e) => {
+      console.log('[SSE] 连接错误, readyState:', sse.readyState, e)
+    }
+
+    return () => {
+      console.log('[SSE] 清理连接')
+      if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
+      if (typewriterTimerRef.current) clearInterval(typewriterTimerRef.current)
+      sse.close()
+      sseRef.current = null
+    }
+  }, [handleChatEvent])
+
+  const waitForResponse = async (key: string, _minMessages: number) => {
+    // SSE handles streaming and completion. This just waits for SSE to signal done,
+    // with a fallback poll every 10s in case SSE is disconnected.
+    sseCompletedRef.current = false
+    const maxWaitMs = 240000 // 4 minutes max
+    const fallbackInterval = 10000 // poll every 10s as fallback
+    const startTime = Date.now()
+
+    while (Date.now() - startTime < maxWaitMs) {
+      await new Promise(r => setTimeout(r, 2000))
+
+      if (sseCompletedRef.current) return
+      if (key !== activeSessionKeyRef.current) return
+
+      // Fallback: if SSE is disconnected, poll less frequently
+      const elapsed = Date.now() - startTime
+      if (elapsed > fallbackInterval && elapsed % fallbackInterval < 2500) {
+        try {
+          const detail = await getSession(key)
+          const msgs = detail.messages || []
+          const hasReply = msgs.some((m, idx) => idx >= _minMessages && m.role === 'assistant')
+          if (hasReply && !targetTextRef.current) {
+            // SSE missed the events — load messages directly
+            setMessages(msgs)
+            setStreamingText('')
+            sseCompletedRef.current = true
+            return
+          }
+        } catch {}
+      }
+    }
+
+    // Timeout — load final state
     try {
       const detail = await getSession(key)
       setMessages(detail.messages || [])
-    } catch { /* ignore */ }
+    } catch {}
+    setStreamingText('')
+    sseCompletedRef.current = true
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -606,9 +624,11 @@ export default function Chat() {
                             : 'bg-dark-card border border-dark-border text-dark-text'
                         }`}
                       >
-                        <div className="text-sm whitespace-pre-wrap break-words">
-                          {msg.content}
-                        </div>
+                        {msg.role === 'user' ? (
+                          <div className="text-sm whitespace-pre-wrap break-words">{msg.content}</div>
+                        ) : (
+                          <MarkdownContent content={msg.content} />
+                        )}
                         {msg.timestamp && (
                           <div className={`text-[10px] mt-1 ${
                             msg.role === 'user' ? 'text-white/60' : 'text-dark-text-secondary'
@@ -629,11 +649,18 @@ export default function Chat() {
                       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue mt-0.5">
                         <Bot size={14} />
                       </div>
-                      <div className="rounded-xl px-4 py-2.5 bg-dark-card border border-dark-border">
-                        <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
-                          <Loader2 size={14} className="animate-spin" />
-                          思考中...
-                        </div>
+                      <div className="rounded-xl px-4 py-2.5 bg-dark-card border border-dark-border max-w-[80%]">
+                        {displayedText ? (
+                          <div className="text-dark-text">
+                            <MarkdownContent content={displayedText} />
+                            <span className="inline-block w-1.5 h-4 ml-0.5 bg-accent-blue rounded-sm animate-pulse align-text-bottom" />
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
+                            <Loader2 size={14} className="animate-spin" />
+                            思考中...
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

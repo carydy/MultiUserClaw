@@ -122,6 +122,11 @@ export class BridgeGatewayClient {
     this.eventListeners.push(listener);
   }
 
+  offEvent(listener: (evt: GatewayEvent) => void): void {
+    const idx = this.eventListeners.indexOf(listener);
+    if (idx !== -1) this.eventListeners.splice(idx, 1);
+  }
+
   isConnected(): boolean {
     return this.connected;
   }

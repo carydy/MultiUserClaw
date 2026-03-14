@@ -6,6 +6,8 @@ directly.  The container token is sent as the Bearer token.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.engine import get_db
 from app.llm_proxy.service import proxy_chat_completion
 
+logger = logging.getLogger("platform.routes.llm")
 router = APIRouter(prefix="/llm/v1", tags=["llm-proxy"])
 
 
@@ -50,12 +53,11 @@ async def chat_completions(
     raw_body = await request.body()
     raw_json = _json.loads(raw_body)
 
-    import logging
     # Log extra keys sent by openclaw that we don't handle
     known_keys = {"model", "messages", "max_tokens", "temperature", "tools", "tool_choice", "stream"}
     extra_keys = set(raw_json.keys()) - known_keys
     if extra_keys:
-        logging.warning(f"LLM proxy: extra request keys from client: {extra_keys}")
+        logger.debug("客户端发送了额外的请求字段 (已忽略): %s", extra_keys)
 
     req = ChatCompletionRequest(**raw_json)
 

@@ -7,11 +7,17 @@ export default defineConfig({
   server: {
     port: 3080,
     proxy: {
-      '/api': 'http://localhost:8080',
-      '/ws': {
-        target: 'ws://localhost:8080',
-        ws: true,
+      '/api/openclaw/events/stream': {
+        target: 'http://localhost:8080',
+        // Disable buffering for SSE
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            proxyRes.headers['cache-control'] = 'no-cache'
+            proxyRes.headers['x-accel-buffering'] = 'no'
+          })
+        },
       },
+      '/api': 'http://localhost:8080',
     },
   },
 })

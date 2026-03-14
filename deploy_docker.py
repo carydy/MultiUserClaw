@@ -34,7 +34,9 @@
 
 import argparse
 import concurrent.futures
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -152,68 +154,20 @@ def check_env_file():
         warn(".env 中未找到有效的 API Key，请确认配置")
 
 
-def migrate_old_volumes():
-    """Migrate data from old split volumes (workspace+sessions) to the new unified data volume.
 
-    Old scheme:  openclaw-workspace-{id} + openclaw-sessions-{id}
-    New scheme:  openclaw-data-{id}  (mounted at ~/.openclaw)
-
-    Uses a temporary alpine container to copy data between volumes.
+def sync_deploy_copy_to_bridge():
+    """将 deploy_copy 内容复制到 openclaw/bridge-deploy-copy/，
+    供 Dockerfile 和 entrypoint 在容器启动时同步到用户 ~/.openclaw/。
     """
-    log("检查是否需要迁移旧数据卷...")
-
-    # Find old workspace volumes
-    result = subprocess.run(
-        'docker volume ls -q --filter "name=openclaw-workspace-"',
-        shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
-    )
-    old_workspace_vols = [v.strip() for v in result.stdout.strip().splitlines() if v.strip()]
-
-    if not old_workspace_vols:
-        log("未发现旧数据卷，跳过迁移")
+    deploy_dir = os.path.join(PROJECT_DIR, "deploy_copy")
+    if not os.path.isdir(deploy_dir):
         return
 
-    log(f"发现 {len(old_workspace_vols)} 个旧数据卷，开始迁移...")
-
-    for ws_vol in old_workspace_vols:
-        # Extract short_id:  openclaw-workspace-abc12345 → abc12345
-        short_id = ws_vol.replace("openclaw-workspace-", "")
-        sess_vol = f"openclaw-sessions-{short_id}"
-        data_vol = f"openclaw-data-{short_id}"
-
-        # Check if new volume already has data (skip if so)
-        check = subprocess.run(
-            f'docker run --rm -v {data_vol}:/data alpine sh -c "ls /data/ 2>/dev/null | head -1"',
-            shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
-        )
-        if check.stdout.strip():
-            log(f"  {data_vol} 已有数据，跳过")
-            continue
-
-        # Copy workspace data
-        log(f"  迁移 {ws_vol} → {data_vol}/workspace")
-        run(
-            f'docker run --rm -v {ws_vol}:/src:ro -v {data_vol}:/dst alpine sh -c '
-            f'"mkdir -p /dst/workspace && cp -a /src/. /dst/workspace/"',
-            check=False,
-        )
-
-        # Copy sessions data
-        sess_check = subprocess.run(
-            f'docker volume inspect {sess_vol}',
-            shell=True, capture_output=True, text=True, cwd=PROJECT_DIR,
-        )
-        if sess_check.returncode == 0:
-            log(f"  迁移 {sess_vol} → {data_vol}/sessions")
-            run(
-                f'docker run --rm -v {sess_vol}:/src:ro -v {data_vol}:/dst alpine sh -c '
-                f'"mkdir -p /dst/sessions && cp -a /src/. /dst/sessions/"',
-                check=False,
-            )
-
-        success(f"  {short_id} 迁移完成")
-
-    success("数据卷迁移完成")
+    dst = os.path.join(PROJECT_DIR, "openclaw", "bridge-deploy-copy")
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(deploy_dir, dst)
+    success(f"deploy_copy → openclaw/bridge-deploy-copy/ 已同步")
 
 
 def build_openclaw_image():
@@ -422,6 +376,9 @@ def main():
     if args.rebuild:
         services = [s.strip() for s in args.rebuild.split(",") if s.strip()]
 
+        # 同步 deploy_copy
+        sync_deploy_copy_to_bridge()
+
         # "openclaw" 表示重建基础镜像 + 清理旧用户容器
         if "openclaw" in services:
             build_openclaw_image()
@@ -437,9 +394,6 @@ def main():
             if container_ids:
                 run(f"docker rm -f {container_ids}", check=False)
                 success("旧用户容器已清理")
-
-            # 迁移旧的分离卷到新的统一卷
-            migrate_old_volumes()
 
             # 清理 DB 中的容器记录
             log("清理数据库容器记录...")
@@ -465,6 +419,9 @@ def main():
         return
 
     check_env_file()
+
+    # 同步 deploy_copy 到 bridge 构建目录
+    sync_deploy_copy_to_bridge()
 
     # 设置 VITE_API_URL（frontend 构建需要）
     api_url = resolve_vite_api_url(args.host, args.gateway_port, args.relative_api)

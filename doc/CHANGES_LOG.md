@@ -187,3 +187,49 @@ openclaw/Dockerfile.bridge 已经包含了完整的 openclaw 主程序（COPY . 
   - 前端 (Plugins.tsx): 新页面 /plugins，显示已安装插件列表 + 可用渠道扩展目录（飞书、Matrix、Teams 等），支持一键安装/卸载，带 npm
   包名输入框手动安装
   - 侧边栏: 技能中心下新增「插件管理」入口
+
+
+  根本原因：Gateway 的 WebSocket 协议要求 Ed25519 设备认证签名（见 bridge 的 gateway-client.ts），前端发送的 connect 请求缺少 device
+  字段和签名，所以 gateway 握手后立即断开(code 1000)，导致：
+  - 无法收到 delta 事件 → 无流式显示
+  - 不断重连 → 大量 WS 连接/断开循环
+
+  解决方案：用 SSE (Server-Sent Events) 替代 WebSocket
+
+  1. Bridge gateway-client.ts — 添加 offEvent() 方法用于清理 SSE 连接的监听器
+  2. Bridge routes/events.ts (新文件) — SSE 端点 /api/events/stream，通过 bridge 已有的 BridgeGatewayClient（已正确认证）接收 gateway 的 chat
+  事件，以 SSE 格式推送给前端
+  3. Bridge server.ts — 挂载 events 路由
+  4. Platform proxy.py — 对 events/stream 路径特殊处理，用 httpx.stream() 流式代理 SSE，不缓冲
+  5. Frontend Chat.tsx — 整个 WebSocket 代码替换为 EventSource (SSE)：
+    - 无需 gateway 握手/认证
+    - 浏览器原生自动重连（内建退避）
+    - 接收 delta/started/final 事件，实现流式文字显示
+    - 流式显示时有闪烁光标动画
+  6. vite.config.ts — 移除不再需要的 WS 代理配置
+
+  重启 start_local.py 后测试即可。
+
+
+  为什么之前不显示
+
+  Agent 发现机制是扫描 ~/.openclaw/agents/<id>/ 目录 + openclaw.json 的 agents.list，而不是从 workspace
+  目录发现。你只是把文件放进去了，但没有：
+  1. 创建 ~/.openclaw/agents/<id>/ 目录
+  2. 在 openclaw.json 中注册
+
+  修改了什么
+
+  start_local.py（本地部署）：
+  - 新增 _sync_agents() 函数：遍历 deploy_copy/Agents/ 每个子目录
+  - 新增 _register_agents_in_config()：把 agent 写入 openclaw.json 的 agents.list
+  - 对每个 agent 做三件事：
+    a. ~/.openclaw/agents/<id>/ — 创建目录（gateway 磁盘发现）
+    b. ~/.openclaw/workspace-<id>/ — 同步 SOUL.md 等工作区文件
+    c. openclaw.json agents.list[] — 注册 id、name、workspace 路径
+
+  bridge-entrypoint.sh（Docker 容器启动）：
+  - 同样的三步逻辑，用 bash + node 实现
+  - 遍历 /deploy-copy/Agents/*/，为每个 agent 创建目录、同步文件、注册配置
+
+  两个脚本都是幂等的 — 已存在的文件不覆盖，已注册的 agent 不重复注册。

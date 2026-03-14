@@ -12,8 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
+from app.logging_setup import setup_logging, log_settings_summary
 from app.routes import auth, llm, proxy, admin
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +57,7 @@ async def _ensure_database() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log_settings_summary()
     # Ensure the target database exists before creating tables
     await _ensure_database()
     async with engine.begin() as conn:

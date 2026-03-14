@@ -184,25 +184,17 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
 
 ---
 
-## 故障排查
-
-**问题：连接被拒绝**
+## 部署完成后的curl测试
 ```
-Error calling LLM: Connection refused
+curl -X POST http://localhost:8000/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer Empty" \
+     -d '{
+           "model": "Qwen2.5-7B-Instruct",
+           "messages": [
+               {"role": "user", "content": "你好"}
+           ]
+         }'
+输出
+{"id":"chatcmpl-8c9ba236ade65176","object":"chat.completion","created":1773411630,"model":"Qwen2.5-7B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"你好！很高兴为你提供帮助。有什么问题或需要什么信息我可以帮你查找吗？","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":30,"total_tokens":49,"completion_tokens":19,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}%
 ```
-检查 vLLM 服务是否已启动，以及 `apiBase` 地址是否正确。
-
-**问题：模型名称不匹配**
-```
-Error: model not found
-```
-确认 config.json 中的 `model` 字段与 vLLM 启动时的 `--served-model-name` 完全一致。
-
-**问题：工具调用失败**
-部分较小的模型工具调用能力较弱，可尝试换用更大参数量的模型（如 14B、72B），或换用工具调用能力更强的模型系列。
-
-**问题：显存不足**
-尝试以下方案：
-- 使用量化版本（GPTQ/AWQ），例如 `Qwen/Qwen2.5-7B-Instruct-AWQ`
-- 减小 `--max-model-len`，如 `--max-model-len 8192`
-- 启用 `--gpu-memory-utilization 0.85`（调整显存使用比例）
