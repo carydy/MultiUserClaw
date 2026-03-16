@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import secrets
+import tarfile
+import time
 from pathlib import Path
 
 import docker
-from docker.errors import APIError as DockerAPIError, NotFound as DockerNotFound
+from docker.errors import NotFound as DockerNotFound
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +38,99 @@ def _ensure_network() -> None:
             driver="bridge",
             internal=False,  # allow internet access for tool downloads
         )
+
+
+def _published_binding(container: docker.models.containers.Container, container_port: str) -> tuple[str, str]:
+    """Return (host_ip, host_port) for a published container port."""
+    ports = container.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
+    bindings = ports.get(container_port) or []
+    if not bindings:
+        return "", ""
+    host_ip = bindings[0].get("HostIp", "") or ""
+    host_port = bindings[0].get("HostPort", "") or ""
+    return host_ip, host_port
+
+
+def _build_expose_port_skill_markdown(
+    user_id: str,
+    container_name: str,
+    browser_binding: tuple[str, str],
+    service_binding: tuple[str, str],
+) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
+    lines = [
+        "---",
+        "name: container-expose-info",
+        "description: Current container info and host-exposed ports (5900/30000).",
+        "---",
+        "",
+        "# Container Expose Info",
+        "",
+        f"- User ID: `{user_id}`",
+        f"- Container: `{container_name}`",
+        f"- Generated At: `{now}`",
+        "",
+        "## Mapped Ports",
+        "",
+    ]
+
+    browser_ip, browser_port = browser_binding
+    service_ip, service_port = service_binding
+
+    if browser_port:
+        lines.append(f"- `5900/tcp` (browser) -> `{browser_ip}:{browser_port}`")
+    else:
+        lines.append("- `5900/tcp` (browser) -> `not published`")
+
+    if service_port:
+        lines.append(f"- `30000/tcp` (service) -> `{service_ip}:{service_port}`")
+    else:
+        lines.append("- `30000/tcp` (service) -> `not published`")
+
+    lines.extend([
+        "",
+        "## Notes",
+        "",
+        "- This file is auto-generated during user container creation.",
+        "- Recreate the user container to refresh mapped host ports.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _write_expose_port_skill(container: docker.models.containers.Container, markdown: str) -> None:
+    """Write /root/.openclaw/workspace/skills/container-expose-info/SKILL.md via put_archive."""
+    content = markdown.encode("utf-8")
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+        workspace_dir = tarfile.TarInfo(name="workspace")
+        workspace_dir.type = tarfile.DIRTYPE
+        workspace_dir.mode = 0o755
+        workspace_dir.mtime = int(time.time())
+        tar.addfile(workspace_dir)
+
+        skills_dir = tarfile.TarInfo(name="workspace/skills")
+        skills_dir.type = tarfile.DIRTYPE
+        skills_dir.mode = 0o755
+        skills_dir.mtime = int(time.time())
+        tar.addfile(skills_dir)
+
+        skill_subdir = tarfile.TarInfo(name="workspace/skills/container-expose-info")
+        skill_subdir.type = tarfile.DIRTYPE
+        skill_subdir.mode = 0o755
+        skill_subdir.mtime = int(time.time())
+        tar.addfile(skill_subdir)
+
+        skill_file = tarfile.TarInfo(name="workspace/skills/container-expose-info/SKILL.md")
+        skill_file.size = len(content)
+        skill_file.mode = 0o644
+        skill_file.mtime = int(time.time())
+        tar.addfile(skill_file, io.BytesIO(content))
+
+    tar_buffer.seek(0)
+    ok = container.put_archive("/root/.openclaw", tar_buffer.read())
+    if not ok:
+        raise RuntimeError("failed to write container-expose-info SKILL.md into container")
 
 
 async def get_container(db: AsyncSession, user_id: str) -> Container | None:
@@ -95,31 +191,39 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
     except DockerNotFound:
         pass
 
+    run_kwargs = {
+        "image": settings.openclaw_image,
+        "command": ["node", "bridge/dist/start.js"],
+        "name": container_name,
+        "detach": True,
+        "environment": {
+            "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
+            "NANOBOT_PROXY__TOKEN": container_token,
+            "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
+            "TZ": settings.container_tz,
+            # Force-enable channel startup inside user containers.
+            # bridge/start.ts will skip injecting OPENCLAW_SKIP_CHANNELS=1
+            # when BRIDGE_ENABLE_CHANNELS is set to "1".
+            "BRIDGE_ENABLE_CHANNELS": "1",
+        },
+        "mounts": [
+            docker.types.Mount("/root/.openclaw", data_vol, type="volume"),
+        ],
+        "network": settings.container_network,
+        "mem_limit": settings.container_memory_limit,
+        "nano_cpus": int(settings.container_cpu_limit * 1e9),
+        "pids_limit": settings.container_pids_limit,
+        "restart_policy": {"Name": "unless-stopped"},
+    }
+
+    if settings.user_container_publish_ports:
+        run_kwargs["ports"] = {
+            "5900/tcp": (settings.user_container_bind_ip, None),
+            "30000/tcp": (settings.user_container_bind_ip, None),
+        }
+
     try:
-        docker_container = client.containers.run(
-            image=settings.openclaw_image,
-            command=["node", "bridge/dist/start.js"],
-            name=container_name,
-            detach=True,
-            environment={
-                "NANOBOT_PROXY__URL": f"http://gateway:8080/llm/v1",
-                "NANOBOT_PROXY__TOKEN": container_token,
-                "NANOBOT_AGENTS__DEFAULTS__MODEL": settings.default_model,
-                "TZ": settings.container_tz,
-                # Force-enable channel startup inside user containers.
-                # bridge/start.ts will skip injecting OPENCLAW_SKIP_CHANNELS=1
-                # when BRIDGE_ENABLE_CHANNELS is set to "1".
-                "BRIDGE_ENABLE_CHANNELS": "1",
-            },
-            mounts=[
-                docker.types.Mount("/root/.openclaw", data_vol, type="volume"),
-            ],
-            network=settings.container_network,
-            mem_limit=settings.container_memory_limit,
-            nano_cpus=int(settings.container_cpu_limit * 1e9),
-            pids_limit=settings.container_pids_limit,
-            restart_policy={"Name": "unless-stopped"},
-        )
+        docker_container = client.containers.run(**run_kwargs)
     except Exception:
         # Docker creation failed — remove the placeholder DB record
         await db.rollback()
@@ -127,6 +231,16 @@ async def create_container(db: AsyncSession, user_id: str) -> Container | None:
 
     # Read container IP on the internal network
     docker_container.reload()
+    browser_binding = _published_binding(docker_container, "5900/tcp")
+    service_binding = _published_binding(docker_container, "30000/tcp")
+    expose_markdown = _build_expose_port_skill_markdown(
+        user_id=user_id,
+        container_name=container_name,
+        browser_binding=browser_binding,
+        service_binding=service_binding,
+    )
+    _write_expose_port_skill(docker_container, expose_markdown)
+
     network_settings = docker_container.attrs["NetworkSettings"]["Networks"]
     internal_ip = network_settings.get(settings.container_network, {}).get("IPAddress", "")
 
