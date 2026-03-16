@@ -260,6 +260,38 @@ openclaw/Dockerfile.bridge 已经包含了完整的 openclaw 主程序（COPY . 
 
   两个脚本都是幂等的 — 已存在的文件不覆盖，已注册的 agent 不重复注册。
 
+ 1. 后端 marketplaces.ts — 新增 2 个 API 端点
+
+  - POST /api/marketplaces/git/scan-skills — 接收 git URL，克隆仓库（支持 https://、git@、ssh://、git://），递归扫描最多
+   3 层深度查找包含 SKILL.md 的目录，返回技能列表和 cacheKey
+  - POST /api/marketplaces/git/install-skills — 接收 cacheKey + 选中的技能名列表，将对应技能目录复制到
+  ~/.openclaw/skills/（全局安装）
+
+  辅助函数：
+  - hashString() — 用于生成唯一的缓存目录名
+  - parseSkillMdDescription() — 解析 SKILL.md 获取描述
+  - scanForSkills() — 递归查找包含 SKILL.md 的目录
+
+  2. 前端 API api.ts — 新增类型和函数
+
+  - GitSkillInfo、GitScanResult 类型定义
+  - scanGitSkills(url) — 调用扫描接口
+  - installGitSkills(cacheKey, skillNames) — 调用批量安装接口
+
+  3. 前端 UI SkillStore.tsx — 新增 Git 仓库导入区域
+
+  - 紫色主题的 Git URL 输入框 + 扫描按钮
+  - 扫描结果以复选框列表展示，支持全选/取消全选
+  - 批量安装选中的技能，安装完成后显示绿色已安装状态
+  - 自动刷新已安装技能列表
+
+  流程
+
+  1. 用户输入 https://github.com/xxx/repo.git 或 git@github.com:xxx/repo.git
+  2. 点击「扫描」→ 后端克隆仓库，扫描所有 SKILL.md
+  3. 显示技能列表，默认全选
+  4. 用户勾选需要的技能，点击「安装选中」
+  5. 技能复制到全局 skills 目录，刷新列表
 
   现有 Admin API 覆盖了大部分需求，但以下功能需要补充：
 

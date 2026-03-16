@@ -39,7 +39,7 @@ services:
       PLATFORM_DATABASE_URL: postgresql+asyncpg://nanobot:nanobot@postgres:5432/nanobot_platform
       PLATFORM_JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
 
-      # Admin account (auto-created on first startup)
+      # 启动时自动创建管理员账号
       PLATFORM_ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       PLATFORM_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
 

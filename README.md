@@ -1042,7 +1042,11 @@ bridge、bridge-entrypoint.sh、bridge-package.json、bridge-deploy-copy、Docke
 5. 删除逐个确认 — 本地有但上游没有的文件，逐个询问是否删除
 6. dry-run 模式 — 用 --dry-run 只看差异不执行操作
 
-## 12. 如何配置Channel，打通QQ，飞书等
+# 12. 容器的内部端口5900浏览器端口和30000外部端口进行暴露，然后会被映射到主机的随机端口上
+browser_binding = _published_binding(docker_container, "5900/tcp")
+service_binding = _published_binding(docker_container, "30000/tcp")
+
+## 13. 如何配置Channel，打通QQ，飞书等
 https://zhuanlan.zhihu.com/p/2016049817437111235
 
 ## 📬 联系方式
