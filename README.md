@@ -26,6 +26,7 @@ http://117.133.60.219:3081 管理端，可以查看容器的状态，amdin/welco
   - openclaw目录就是官方的openclaw，新建了1个openclaw/bridge作为中间层，对openclaw的控制。
   - 所以一共分有前端容器，platform容器，openclaw容器（包括bridge被platform控制，和控制openclaw）
   - 如果要升级openclaw，只需要替换openclaw整个目录，注意保留bridge目录，运行upgrade_openclaw.py文件。
+  - 3月18日更新openclaw.json默认配置Agent2Agent模式，远程Terminal连接容器，对话完成的提示
 
 更新：
 - 容器的端口信息显示
