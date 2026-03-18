@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { getMe, listAgents } from '../lib/api'
 import type { AuthUser } from '../lib/api'
+import Brand from './Brand'
 import {
   LayoutDashboard,
   Bot,
@@ -69,15 +70,7 @@ export default function Sidebar() {
   return (
     <aside className="flex w-56 flex-col bg-dark-sidebar border-r border-dark-border">
       {/* Logo */}
-      <div className="flex items-center gap-3 px-5 py-5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-blue text-sm font-bold text-white">
-          OC
-        </div>
-        <div>
-          <div className="text-sm font-semibold text-dark-text">OpenClaw AI</div>
-          <div className="text-xs text-dark-text-secondary">Multi User OpenClaw v2026.3</div>
-        </div>
-      </div>
+      <Brand />
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-3 py-2">

@@ -30,6 +30,7 @@ http://117.133.60.219:3081 管理端，可以查看容器的状态，amdin/welco
 更新：
 - 容器的端口信息显示
 - 可以直接下载目录了
+- 分离代码: frontend/src/components/Brand.tsx 单独设置Logo和简介信息
 
 ## 目录
 
