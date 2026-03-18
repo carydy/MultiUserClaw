@@ -17,6 +17,7 @@ import {
   Check,
 } from 'lucide-react'
 import MarkdownContent from '../components/MarkdownContent'
+import { useNotifications } from '../components/NotificationProvider'
 import {
   listSessions,
   getSession,
@@ -67,6 +68,7 @@ function getUploadDir(agentId: string): string {
 }
 
 export default function Chat() {
+  const { registerPendingSession, clearPendingSession } = useNotifications()
   const [searchParams, setSearchParams] = useSearchParams()
 
   // Sessions
@@ -328,12 +330,15 @@ export default function Chat() {
       setPendingFiles([])
 
       setStreamingText('')
+      const baselineAssistantCount = messages.filter(msg => msg.role === 'assistant').length
+      registerPendingSession(activeSessionKey, baselineAssistantCount)
       await sendChatMessage(activeSessionKey, finalMessage)
 
       // Wait for response (WebSocket for completion signal + polling for intermediate updates)
       await waitForResponse(activeSessionKey, messages.length + 1)
       fetchSessions()
     } catch (err: any) {
+      if (activeSessionKey) clearPendingSession(activeSessionKey)
       setError(err?.message || '发送失败')
     } finally {
       setSending(false)

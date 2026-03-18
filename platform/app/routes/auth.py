@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import (
-    authenticate_user,
+    AuthFailureReason,
+    authenticate_user_with_reason,
     create_access_token,
     create_api_token,
     create_refresh_token,
@@ -68,9 +69,9 @@ class UserResponse(BaseModel):
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if await get_user_by_username(db, req.username):
-        raise HTTPException(status_code=400, detail="Username already taken")
+        raise HTTPException(status_code=400, detail="账号已存在")
     if await get_user_by_email(db, req.email):
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="邮箱已被注册")
 
     user = await create_user(db, req.username, req.email, req.password)
     return TokenResponse(
@@ -84,9 +85,16 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
-    user = await authenticate_user(db, req.username, req.password)
+    user, failure_reason = await authenticate_user_with_reason(db, req.username, req.password)
     if user is None:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        detail = "登录失败"
+        if failure_reason == AuthFailureReason.USER_NOT_FOUND:
+            detail = "账号不存在"
+        elif failure_reason == AuthFailureReason.ACCOUNT_DISABLED:
+            detail = "账号已被禁用"
+        elif failure_reason == AuthFailureReason.PASSWORD_INCORRECT:
+            detail = "密码错误"
+        raise HTTPException(status_code=401, detail=detail)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),

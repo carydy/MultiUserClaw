@@ -119,6 +119,16 @@ export function isLoggedIn(): boolean {
 
 let refreshPromise: Promise<boolean> | null = null
 
+async function parseErrorMessage(res: Response): Promise<string> {
+  try {
+    const data = await res.json() as { detail?: string; message?: string }
+    return data.detail || data.message || `请求失败 (${res.status})`
+  } catch {
+    const body = await res.text()
+    return body || `请求失败 (${res.status})`
+  }
+}
+
 async function tryRefreshToken(): Promise<boolean> {
   const refresh = getRefreshToken()
   if (!refresh) return false
@@ -177,8 +187,7 @@ export async function fetchJSON<T>(
   }
 
   if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`API ${res.status}: ${body}`)
+    throw new Error(await parseErrorMessage(res))
   }
 
   return res.json() as Promise<T>

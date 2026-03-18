@@ -10,6 +10,11 @@ import type {
 // In development, call Gateway directly. In production (Docker), use relative URL to hit Next.js proxy.
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
+async function parseErrorMessage(res: Response): Promise<string> {
+  const err = await res.json().catch(() => null) as { detail?: string; message?: string } | null;
+  return err?.detail || err?.message || `Request failed: ${res.status}`;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getAccessToken();
   const headers: Record<string, string> = {
@@ -49,8 +54,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    throw new Error(await parseErrorMessage(res));
   }
   return res.json();
 }

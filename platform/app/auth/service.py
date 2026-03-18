@@ -85,6 +85,12 @@ async def create_user(db: AsyncSession, username: str, email: str, password: str
     return user
 
 
+class AuthFailureReason:
+    USER_NOT_FOUND = "user_not_found"
+    ACCOUNT_DISABLED = "account_disabled"
+    PASSWORD_INCORRECT = "password_incorrect"
+
+
 async def authenticate_user(db: AsyncSession, username: str, password: str) -> User | None:
     """Verify credentials. Returns User on success, None on failure."""
     user = await get_user_by_username(db, username)
@@ -96,3 +102,20 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> U
     if not verify_password(password, user.password_hash):
         return None
     return user
+
+
+async def authenticate_user_with_reason(
+    db: AsyncSession, username: str, password: str
+) -> tuple[User | None, str | None]:
+    """Verify credentials and return a concrete failure reason when rejected."""
+    user = await get_user_by_username(db, username)
+    if user is None:
+        # Also try email as login identifier
+        user = await get_user_by_email(db, username)
+    if user is None:
+        return None, AuthFailureReason.USER_NOT_FOUND
+    if not user.is_active:
+        return None, AuthFailureReason.ACCOUNT_DISABLED
+    if not verify_password(password, user.password_hash):
+        return None, AuthFailureReason.PASSWORD_INCORRECT
+    return user, None
