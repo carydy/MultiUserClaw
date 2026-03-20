@@ -1,4 +1,4 @@
-# 网关认证错误
+# 网关认证错误，应该是你启动了其它的openclaw实例，导致和现有openclaw冲突，停止其它openclaw即可
 [  bridge] [gateway-client] Connection closed (unauthorized: gateway token missing (provide gateway auth token)), reconnecting in 2s...
 [  bridge] [gateway-client] Connection closed (unauthorized: gateway token missing (provide gateway auth token)), reconnecting in 2s...
 [  bridge] [gateway-client] Connection closed (unauthorized: gateway token missing (provide gateway auth token)), reconnecting in 2s...
@@ -14,11 +14,10 @@
       59      "auth": {
       60 -      "mode": "none"
       60 +      "mode": "none",
-      61 +      "token": "local-dev-token-openclaw"
+      61 +      "token": "
       62      },
       63      "controlUi": {
       64        "allowedOrigins": [
 
-⏺ 设置了 gateway.auth.token。这是 extension-relay 需要的，即使 auth mode 是 none 也要有个 token 用于 relay 内部通信。重启 bridge
-  应该就不报这个错了。
+
 

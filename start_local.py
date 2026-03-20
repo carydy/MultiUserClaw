@@ -237,8 +237,7 @@ def start_bridge(env: dict) -> "subprocess.Popen | None":
             cmd = ["node", "bridge/dist/start.js"]
 
     # 本地开发模式：启用渠道（飞书、Telegram 等），不跳过
-    # OPENCLAW_GATEWAY_TOKEN 供 extension-relay 和 gateway-client 使用
-    bridge_env = _base_env(BRIDGE_ENABLE_CHANNELS="1", OPENCLAW_GATEWAY_TOKEN="local-dev-token", **env)
+    bridge_env = _base_env(BRIDGE_ENABLE_CHANNELS="1", **env)
 
     proc = subprocess.Popen(
         cmd,
