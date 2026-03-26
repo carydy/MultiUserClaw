@@ -35,6 +35,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# 4.5) Git: rewrite SSH URLs to HTTPS (Docker has no SSH keys)
+RUN git config --global url."https://github.com/".insteadOf "git@github.com:" && \
+    git config --global url."https://github.com/".insteadOf "git+ssh://git@github.com/"
+
 # 5) Use domestic pip mirror
 RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
     pip3 config set global.trusted-host pypi.tuna.tsinghua.edu.cn
@@ -43,15 +47,17 @@ WORKDIR /app
 
 # Make pnpm binaries (including openclaw CLI) available globally
 ENV PATH="/app/node_modules/.bin:$PATH"
+# 让所有插件（微信、searxng 等）都能解析到主程序的依赖（如 @sinclair/typebox）
+ENV NODE_PATH="/app/node_modules"
 
 # Install openclaw dependencies
-COPY .npmrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY .npmrc package.json pnpm-workspace.yaml ./
 COPY patches/ ./patches/
 COPY ui/ ./ui/
 COPY bridge/ ./bridge/
 COPY packages/ ./packages/
 COPY extensions/ ./extensions/
-RUN npm install -g pnpm tsx && pnpm install --frozen-lockfile
+RUN rm -f pnpm-lock.yaml && npm install && npm install -g pnpm && pnpm install
 
 # Copy openclaw source and build
 COPY . .
@@ -64,6 +70,8 @@ RUN find /app/src -name "*.js" -type f ! -path "*/node_modules/*" ! -name "a2ui.
 RUN pnpm build
 # 安装openclaw命令到/usr/local/bin/openclaw
 RUN npm install -g .
+# 安装微信插件，确保用户容器启动后可直接使用
+RUN npx -y @tencent-weixin/openclaw-weixin-cli@latest install
 
 # 给summarize工具安装
 RUN npm i -g @steipete/summarize
@@ -78,7 +86,7 @@ RUN npm install -g agent-browser
 WORKDIR /app
 COPY bridge-package.json /app/bridge/package.json
 RUN cd bridge && npm install --production=false
-RUN cd /app/bridge && npx tsc -p /app/tsconfig.bridge.json
+RUN cd /app/bridge && node --max-old-space-size=4096 node_modules/.bin/tsc -p /app/tsconfig.bridge.json
 
 WORKDIR /app
 

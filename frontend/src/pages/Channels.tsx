@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   RefreshCw,
   Trash2,
@@ -11,6 +11,8 @@ import {
   X,
   Save,
   CheckCircle,
+  Smartphone,
+  PlugZap,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import type {
@@ -23,10 +25,13 @@ import {
   getChannelConfig,
   saveChannelConfig,
   deleteChannelConfig,
+  getAccessToken,
+  listPlugins,
 } from '../lib/api'
 
 // Static channel catalog — only real OpenClaw-supported channels
 const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; icon: string }> = [
+  { id: 'weixin', label: '微信', description: '通过 openclaw-weixin 插件扫码绑定，首次接入会显示二维码', icon: '🟩' },
   { id: 'telegram', label: 'Telegram', description: '通过 Telegram Bot 接入', icon: '✈️' },
   { id: 'discord', label: 'Discord', description: '通过 Discord Bot 接入', icon: '🎮' },
   { id: 'whatsapp', label: 'WhatsApp', description: '通过 WhatsApp Web (Baileys) 接入', icon: '📱' },
@@ -54,6 +59,32 @@ const CHANNEL_CATALOG: Array<{ id: string; label: string; description: string; i
 const CHANNEL_ICONS: Record<string, string> = Object.fromEntries(
   CHANNEL_CATALOG.map((ch) => [ch.id, ch.icon]),
 )
+
+const WEIXIN_CHANNEL_ID = 'weixin'
+const WEIXIN_PLUGIN_NAME = 'openclaw-weixin'
+const WEIXIN_LOGIN_COMMAND = `openclaw channels login --channel ${WEIXIN_PLUGIN_NAME}`
+
+function base64UrlDecode(value: string): string {
+  const base = value.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = base.length % 4 === 0 ? '' : '='.repeat(4 - (base.length % 4))
+  return atob(base + pad)
+}
+
+function getTokenSubject(token: string): string {
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return 'anonymous'
+    const payload = JSON.parse(base64UrlDecode(parts[1]))
+    const sub = String(payload?.sub ?? '').trim()
+    return sub || 'anonymous'
+  } catch {
+    return 'anonymous'
+  }
+}
+
+function getWeixinTerminalSessionKey(token: string, attempt: number): string {
+  return `weixin-login:${window.location.host}:${getTokenSubject(token)}:${attempt}`
+}
 
 // DM policy options shared across channels
 const DM_POLICY_OPTIONS = [
@@ -349,6 +380,7 @@ export default function Channels() {
 
   // Show restart hint after saving channel config
   const [showRestartHint, setShowRestartHint] = useState(false)
+  const [weixinBindOpen, setWeixinBindOpen] = useState(false)
   const navigate = useNavigate()
 
   const fetchStatus = useCallback(async (showLoader = false) => {
@@ -381,6 +413,10 @@ export default function Channels() {
   }
 
   const openConfig = async (channelType: string) => {
+    if (channelType === WEIXIN_CHANNEL_ID) {
+      setWeixinBindOpen(true)
+      return
+    }
     setConfigChannel(channelType)
     setConfigLoading(true)
     try {
@@ -630,6 +666,16 @@ export default function Channels() {
         />
       )}
 
+      {weixinBindOpen && (
+        <WeixinBindModal
+          onClose={() => setWeixinBindOpen(false)}
+          onBound={() => {
+            setWeixinBindOpen(false)
+            void fetchStatus()
+          }}
+        />
+      )}
+
       {/* Delete confirmation */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -656,6 +702,234 @@ export default function Channels() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+interface WeixinBindModalProps {
+  onClose: () => void
+  onBound: () => void
+}
+
+function WeixinBindModal({ onClose, onBound }: WeixinBindModalProps) {
+  const [ws, setWs] = useState<WebSocket | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const [connected, setConnected] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [pluginReady, setPluginReady] = useState(false)
+  const [output, setOutput] = useState('')
+  const [error, setError] = useState('')
+  const outputRef = useRef<HTMLDivElement | null>(null)
+  const hadSessionRef = useRef(false)
+
+  useEffect(() => {
+    if (!outputRef.current) return
+    outputRef.current.scrollTop = outputRef.current.scrollHeight
+  }, [output])
+
+  useEffect(() => {
+    let disposed = false
+    let nextWs: WebSocket | null = null
+
+    const connect = async () => {
+      const token = getAccessToken()
+      if (!token) {
+        setError('未登录或 token 已失效')
+        return
+      }
+
+      setError('')
+      setConnected(false)
+      setRunning(true)
+      setPluginReady(false)
+      hadSessionRef.current = false
+
+      try {
+        const plugins = await listPlugins()
+        if (disposed) return
+        const installed = plugins.some((plugin) => plugin.name === WEIXIN_PLUGIN_NAME)
+        if (!installed) {
+          setRunning(false)
+          setError('未检测到微信插件。当前页面只负责拉起扫码登录，请先使用预装了 openclaw-weixin 的 bridge 镜像。')
+          return
+        }
+        setPluginReady(true)
+      } catch (err: any) {
+        if (disposed) return
+        setRunning(false)
+        setError(err?.message || '获取插件列表失败')
+        return
+      }
+
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const wsUrl = `${proto}://${window.location.host}/api/openclaw/terminal/ws?token=${encodeURIComponent(token)}`
+      nextWs = new WebSocket(wsUrl)
+      const sessionKey = getWeixinTerminalSessionKey(token, attempt)
+
+      nextWs.onopen = () => {
+        if (disposed) return
+        setConnected(true)
+        setRunning(true)
+        nextWs?.send(JSON.stringify({
+          type: 'init',
+          session_key: sessionKey,
+          command: WEIXIN_LOGIN_COMMAND,
+        }))
+      }
+
+      nextWs.onclose = (event) => {
+        if (disposed) return
+        setConnected(false)
+        setRunning(false)
+        setWs((current) => (current === nextWs ? null : current))
+        if (!hadSessionRef.current) {
+          const reason = event.reason?.trim()
+          setError(reason ? `微信绑定终端未就绪: ${reason}` : '微信绑定终端未就绪')
+        }
+      }
+
+      nextWs.onerror = () => {
+        if (disposed) return
+        setOutput((prev) => `${prev}\n[error] terminal websocket error\n`)
+      }
+
+      nextWs.onmessage = (evt) => {
+        if (disposed) return
+        try {
+          const msg = JSON.parse(String(evt.data))
+          if (msg.type === 'session') {
+            hadSessionRef.current = true
+            const reused = Boolean(msg.reused)
+            setOutput((prev) => `${prev}[session] ${String(msg.session_key ?? '')} ${reused ? '(reused)' : '(new)'}\n`)
+          } else if (msg.type === 'output') {
+            const chunk = String(msg.data ?? '')
+            setOutput((prev) => prev + chunk)
+          } else if (msg.type === 'started') {
+            setOutput((prev) => `${prev}[started] ${String(msg.command ?? '')}\n`)
+          } else if (msg.type === 'exit') {
+            setRunning(false)
+            setOutput((prev) => `${prev}\n[exit] code=${String(msg.code)} signal=${String(msg.signal)}\n`)
+            if (String(msg.code ?? '') === '0') {
+              onBound()
+            }
+          } else if (msg.type === 'error') {
+            setRunning(false)
+            setError(String(msg.message ?? '微信绑定失败'))
+          }
+        } catch {
+          setOutput((prev) => prev + String(evt.data))
+        }
+      }
+
+      setWs(nextWs)
+    }
+
+    void connect()
+
+    return () => {
+      disposed = true
+      try { nextWs?.close() } catch { /* ignore */ }
+    }
+  }, [attempt, onBound])
+
+  const handleClose = () => {
+    try { ws?.close() } catch { /* ignore */ }
+    onClose()
+  }
+
+  const qrLinkMatch = output.match(/https:\/\/liteapp\.weixin\.qq\.com\/q\/[^\s]+/)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="rounded-xl bg-dark-card border border-dark-border max-w-3xl w-full mx-4 shadow-xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-dark-border shrink-0">
+          <div className="flex items-center gap-2">
+            <Smartphone size={18} className="text-accent-green" />
+            <div>
+              <h3 className="text-base font-semibold text-dark-text">绑定微信渠道</h3>
+              <p className="text-xs text-dark-text-secondary mt-0.5">
+                直接发起微信登录并输出扫码二维码，不再重复安装插件
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleClose}
+            className="rounded-lg p-1 text-dark-text-secondary hover:text-dark-text transition-colors"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 border-b border-dark-border bg-dark-bg/40 shrink-0">
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <span className={`inline-flex items-center gap-1 ${connected ? 'text-accent-green' : 'text-dark-text-secondary'}`}>
+              <span className={`inline-block h-2 w-2 rounded-full ${connected ? 'bg-accent-green' : 'bg-gray-500'}`} />
+              {connected ? '终端已连接' : '终端未连接'}
+            </span>
+            <span className={`inline-flex items-center gap-1 ${running ? 'text-accent-yellow' : 'text-dark-text-secondary'}`}>
+              <PlugZap size={12} />
+              {running ? '扫码流程进行中' : '等待重新发起'}
+            </span>
+            <span className={`inline-flex items-center gap-1 ${pluginReady ? 'text-accent-green' : 'text-dark-text-secondary'}`}>
+              <span className={`inline-block h-2 w-2 rounded-full ${pluginReady ? 'bg-accent-green' : 'bg-gray-500'}`} />
+              {pluginReady ? '微信插件已就绪' : '检查微信插件中'}
+            </span>
+            <code className="rounded bg-dark-card px-2 py-1 text-[11px] text-dark-text-secondary">{WEIXIN_LOGIN_COMMAND}</code>
+          </div>
+          {qrLinkMatch && (
+            <div className="mt-3 rounded-lg bg-accent-green/10 p-3 text-sm text-accent-green">
+              浏览器扫码链接：
+              <a
+                href={qrLinkMatch[0]}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-1 underline break-all"
+              >
+                {qrLinkMatch[0]}
+              </a>
+            </div>
+          )}
+          {error && (
+            <div className="mt-3 rounded-lg bg-accent-red/10 p-3 text-sm text-accent-red flex items-center gap-2">
+              <AlertCircle size={16} />
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={outputRef}
+          className="flex-1 overflow-auto whitespace-pre-wrap bg-black px-5 py-4 font-mono text-xs leading-5 text-green-200"
+        >
+          {output || '正在连接微信绑定终端...'}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-dark-border shrink-0">
+          <button
+            onClick={() => {
+              try { ws?.close() } catch { /* ignore */ }
+              setOutput('')
+              setError('')
+              setAttempt((value) => value + 1)
+            }}
+            className="rounded-lg border border-dark-border px-4 py-1.5 text-sm text-dark-text-secondary hover:text-dark-text transition-colors"
+          >
+            重新生成二维码
+          </button>
+          <button
+            onClick={() => setOutput('')}
+            className="rounded-lg border border-dark-border px-4 py-1.5 text-sm text-dark-text-secondary hover:text-dark-text transition-colors"
+          >
+            清空输出
+          </button>
+          <button
+            onClick={handleClose}
+            className="rounded-lg bg-accent-blue px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-blue/90 transition-colors"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

@@ -28,6 +28,7 @@ const EXTENSION_CATALOG = [
   { spec: '@sliverp/qqbot@latest', name: 'qqbot', label: 'QQ Bot', description: 'QQ 机器人接入', icon: '🐧' },
   { spec: '@wecom/wecom-openclaw-plugin', name: 'wecom-openclaw-plugin', label: '企业微信 / WeCom', description: '企业微信 AI Bot WebSocket 持久连接接入', icon: '💼' },
   { spec: '@dingtalk-real-ai/dingtalk-connector', name: 'dingtalk-connector', label: '钉钉 / DingTalk', description: '钉钉企业机器人接入', icon: '💙' },
+  { spec: '@tencent-weixin/openclaw-weixin-cli', name: 'openclaw-weixin', label: '微信 / WeChat', description: '微信消息渠道接入', icon: '💚' },
 ]
 
 export default function Plugins() {
