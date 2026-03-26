@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db.models import Container, UserPortBinding
+from app.db.models import Container, User, UserPortBinding
 
 _client: docker.DockerClient | None = None
 

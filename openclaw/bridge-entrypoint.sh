@@ -11,6 +11,24 @@ mkdir -p "$OPENCLAW_HOME/skills"
 mkdir -p "$OPENCLAW_HOME/extensions"
 mkdir -p "$OPENCLAW_HOME/agents"
 
+# Clean stale Chromium profile lock files left by previous container/host runs.
+# Without this, OpenClaw managed browser may fail with "profile appears to be in use".
+if [ -d "$OPENCLAW_HOME/browser" ]; then
+  find "$OPENCLAW_HOME/browser" -type d -path "*/user-data" | while read profile_dir; do
+    removed=0
+    for lock_name in SingletonLock SingletonCookie SingletonSocket; do
+      lock_path="$profile_dir/$lock_name"
+      if [ -e "$lock_path" ] || [ -L "$lock_path" ]; then
+        rm -f "$lock_path"
+        removed=1
+      fi
+    done
+    if [ "$removed" -eq 1 ]; then
+      echo "[entrypoint] Cleared stale Chromium lock(s): $profile_dir"
+    fi
+  done
+fi
+
 #如果不存在默认openclaw.json文件，初始化1个空的
 if [ ! -f "$OPENCLAW_HOME/openclaw.json" ]; then
   echo "{}" > "$OPENCLAW_HOME/openclaw.json"

@@ -122,6 +122,12 @@
     }
   },
 
+  "browser": {
+    "enabled": true,
+    "executablePath": "/usr/bin/chromium",
+    "noSandbox": true
+  },
+
   "plugins": {
     "enabled": true,
     "allow": ["searxng"],
