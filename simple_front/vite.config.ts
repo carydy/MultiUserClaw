@@ -9,8 +9,8 @@ export default defineConfig({
     proxy: {
       '/api/openclaw/events/stream': {
         target: 'http://localhost:8080',
-        configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes) => {
+        configure: (proxy: any) => {
+          proxy.on('proxyRes', (proxyRes: any) => {
             proxyRes.headers['cache-control'] = 'no-cache'
             proxyRes.headers['x-accel-buffering'] = 'no'
           })
