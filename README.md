@@ -296,6 +296,10 @@ AIHUBMIX_API_KEY=sk-xxxxxxxxxxxx
 # 默认模型（新用户容器使用此模型）
 DEFAULT_MODEL=dashscope/qwen3-coder-plus
 
+# 平台代理模型输入能力（要支持图片识别请保留 text,image）
+# 可选：text 或 text,image
+NANOBOT_PROXY__MODEL_INPUT=text,image
+
 # JWT 密钥（生产环境务必修改）
 JWT_SECRET=your-secure-random-string
 ```
