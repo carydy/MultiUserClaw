@@ -1054,7 +1054,6 @@ service_binding = _published_binding(docker_container, "30000/tcp")
 ## 13. 如何配置Channel，打通QQ，飞书等
 https://zhuanlan.zhihu.com/p/2016049817437111235
 
-
 ## 一些可选可不选的建议哈哈：
 1，后台前端能否添加自己的模型统计
 2，渠道管理安装完点击删除没有响应
