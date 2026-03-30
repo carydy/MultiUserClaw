@@ -6,6 +6,7 @@ export interface BridgeConfig {
   proxyUrl: string;
   proxyToken: string;
   model: string;
+  modelInput: Array<"text" | "image">;
   gatewayPort: number;
   bridgePort: number;
   openclawHome: string;
@@ -14,10 +15,23 @@ export interface BridgeConfig {
   sessionsPath: string;
 }
 
+function parseModelInput(raw: string | undefined): Array<"text" | "image"> {
+  const allowed = new Set(["text", "image"]);
+  const items = (raw || "text,image")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => allowed.has(item));
+  if (items.length === 0) {
+    return ["text"];
+  }
+  return Array.from(new Set(items)) as Array<"text" | "image">;
+}
+
 export function loadConfig(): BridgeConfig {
   const proxyUrl = process.env.NANOBOT_PROXY__URL || "http://localhost:8080/llm/v1";
   const proxyToken = process.env.NANOBOT_PROXY__TOKEN || "dev-token";
   const model = process.env.NANOBOT_AGENTS__DEFAULTS__MODEL || "claude-sonnet-4-20250514";
+  const modelInput = parseModelInput(process.env.NANOBOT_PROXY__MODEL_INPUT);
   const gatewayPort = parseInt(process.env.OPENCLAW_GATEWAY_PORT || "18789", 10);
   const bridgePort = parseInt(process.env.BRIDGE_PORT || "18080", 10);
   const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
@@ -29,6 +43,7 @@ export function loadConfig(): BridgeConfig {
     proxyUrl,
     proxyToken,
     model,
+    modelInput,
     gatewayPort,
     bridgePort,
     openclawHome,
@@ -56,6 +71,7 @@ export function writeOpenclawConfig(cfg: BridgeConfig): void {
           models: [{
             id: cfg.model,
             name: cfg.model,
+            input: cfg.modelInput,
           }],
         },
       },
