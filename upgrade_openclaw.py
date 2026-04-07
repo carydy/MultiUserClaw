@@ -22,6 +22,7 @@ CUSTOM_FILES = {
     "Dockerfile.bridge",
     "tsconfig.bridge.json",
     "upgrade_openclaw.py",
+    "requirements.txt"
 }
 
 

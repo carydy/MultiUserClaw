@@ -497,6 +497,57 @@ export default function Chat() {
     }
   }, [fetchSessions])
 
+  // Handle agent events (tool execution, lifecycle) to maintain loading state
+  const handleAgentEvent = useCallback((payload: any) => {
+    const { stream, data, sessionKey } = payload
+    const currentKey = activeSessionKeyRef.current
+    if (!sessionKey || !currentKey) return
+
+    const normalizedGw = sessionKey.replace(/:/g, '')
+    const normalizedActive = currentKey.replace(/:/g, '')
+    const isCurrentSession = normalizedGw === normalizedActive || sessionKey === currentKey
+    if (!isCurrentSession) return
+
+    if (stream === 'tool') {
+      const phase = data?.phase
+      console.log('[SSE] agent tool event:', { phase })
+      // Tool starting/calling — agent is still working, cancel any completion timer
+      if (phase === 'start' || phase === 'call') {
+        if (sseFinalTimerRef.current) {
+          clearTimeout(sseFinalTimerRef.current)
+          sseFinalTimerRef.current = null
+        }
+        setAgentRunning(true)
+      }
+    } else if (stream === 'lifecycle') {
+      const phase = data?.phase
+      console.log('[SSE] agent lifecycle event:', { phase })
+      // Agent run ended — no more events expected, allow completion
+      if (phase === 'end') {
+        // Use the same debounce pattern as chat final
+        if (sseFinalTimerRef.current) clearTimeout(sseFinalTimerRef.current)
+        sseFinalTimerRef.current = setTimeout(() => {
+          const key = activeSessionKeyRef.current
+          if (key) {
+            getSession(key).then(detail => {
+              setMessages(detail.messages || [])
+              setStreamingText('')
+              setSending(false)
+              setAgentRunning(false)
+              sseCompletedRef.current = true
+              fetchSessions()
+            }).catch(() => {
+              setStreamingText('')
+              setSending(false)
+              setAgentRunning(false)
+              sseCompletedRef.current = true
+            })
+          }
+        }, 1000)
+      }
+    }
+  }, [fetchSessions])
+
   // Connect SSE on mount
   useEffect(() => {
     console.log('[SSE] useEffect 触发')
@@ -521,6 +572,8 @@ export default function Chat() {
         const msg = JSON.parse(evt.data)
         if (msg.event === 'chat' && msg.payload) {
           handleChatEvent(msg.payload)
+        } else if (msg.event === 'agent' && msg.payload) {
+          handleAgentEvent(msg.payload)
         }
       } catch {
         // ignore
@@ -538,7 +591,7 @@ export default function Chat() {
       sse.close()
       sseRef.current = null
     }
-  }, [handleChatEvent])
+  }, [handleChatEvent, handleAgentEvent])
 
   const waitForResponse = async (key: string, runId: string | null) => {
     // SSE handles incremental display. Completion should come from runId-based

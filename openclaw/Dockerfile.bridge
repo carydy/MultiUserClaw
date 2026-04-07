@@ -42,6 +42,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# 5) 创建默认的软连接，对于 python and pip to default to python3 and pip3
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
 # 6) Set locale so Chromium picks up CJK fonts correctly
 ENV LANG=zh_CN.UTF-8
 ENV LC_ALL=zh_CN.UTF-8
@@ -55,6 +59,10 @@ RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple &&
     pip3 config set global.trusted-host pypi.tuna.tsinghua.edu.cn
 
 WORKDIR /app
+
+# 安装一些python的依赖包
+COPY requirements.txt .
+RUN pip3 install --break-system-packages -r requirements.txt
 
 # Make pnpm binaries (including openclaw CLI) available globally
 ENV PATH="/app/node_modules/.bin:$PATH"

@@ -21,8 +21,9 @@ export function eventsRoutes(client: BridgeGatewayClient) {
     res.write(": connected\n\n");
 
     const listener = (evt: GatewayEvent) => {
-      // Only forward chat events (delta, final, started, error, aborted)
-      if (evt.event === "chat") {
+      // Forward chat events (delta, final, started, error, aborted)
+      // and agent events (tool execution lifecycle, assistant streaming)
+      if (evt.event === "chat" || evt.event === "agent") {
         res.write(`data: ${JSON.stringify(evt)}\n\n`);
       }
     };

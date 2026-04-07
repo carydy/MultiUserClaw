@@ -1,5 +1,6 @@
 import { Router } from "express";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import multer from "multer";
 import mime from "mime-types";
@@ -154,6 +155,66 @@ export function filemanagerRoutes(config: BridgeConfig): Router {
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"`);
     fs.createReadStream(absPath).pipe(res);
+  }));
+
+  // GET /api/filemanager/serve?path=  (absolute path, for files outside .openclaw)
+  // Allows serving files from anywhere under the user's home directory.
+  router.get("/filemanager/serve", asyncHandler(async (req, res) => {
+    const absPathParam = req.query.path as string;
+    if (!absPathParam) {
+      res.status(400).json({ detail: "Path is required" });
+      return;
+    }
+
+    // Decode the path (handle URL encoding)
+    let decodedPath = absPathParam;
+    try {
+      let prev = "";
+      while (decodedPath !== prev && decodedPath.includes("%")) {
+        prev = decodedPath;
+        decodedPath = decodeURIComponent(decodedPath);
+      }
+    } catch { /* use as-is */ }
+
+    const resolved = path.resolve(decodedPath);
+
+    // Security: only allow paths under home directory or /tmp
+    const homeDir = os.homedir();
+    const allowedRoots = [homeDir, "/tmp"];
+    const allowed = allowedRoots.some((root) => resolved.startsWith(root));
+    if (!allowed) {
+      res.status(403).json({ detail: "Access denied: path outside allowed directories" });
+      return;
+    }
+
+    // Block sensitive paths
+    const blocked = [".ssh", ".gnupg", ".env", "credentials", ".git/config"];
+    if (blocked.some((b) => resolved.includes(b))) {
+      res.status(403).json({ detail: "Access denied: sensitive path" });
+      return;
+    }
+
+    if (!fs.existsSync(resolved)) {
+      res.status(404).json({ detail: "File not found" });
+      return;
+    }
+
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      res.status(400).json({ detail: "Cannot serve directory via this endpoint" });
+      return;
+    }
+
+    const fileName = path.basename(resolved);
+    const contentType = mime.lookup(fileName) || "application/octet-stream";
+
+    // For images, allow inline display (no Content-Disposition: attachment)
+    const isImage = contentType.startsWith("image/");
+    const disposition = req.query.inline === "1" && isImage ? "inline" : "attachment";
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `${disposition}; filename="${encodeURIComponent(fileName)}"`);
+    fs.createReadStream(resolved).pipe(res);
   }));
 
   // POST /api/filemanager/upload  (multipart, body.path = target dir)
