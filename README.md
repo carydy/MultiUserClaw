@@ -34,7 +34,7 @@
 - Openbrowser的浏览器支持,Agent的状态显示,Minmax也加到环境变量里面,微信二维码显示需要更好的字体和间距
 - simple_front 简化版本前端，只保留对话，微信扫码连接
 -  1. 环境配置 (.env.example)
-   - 新增 NANOBOT_SKILLS_MARKETPLACE_REPO 配置项，用于设置默认的 git 技能市场仓库地址
+   - 新增 NANOBOT_SKILLS_MARKETPLACE_REPO 配置项，用于设置默认的 git 技能市场仓库地址,默认读取marketplaces.json
 
   2. 删除无用技能 (delete_openclaw_skills.py)
    - 扩展了待删除的技能列表，新增第二批清理：
