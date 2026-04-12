@@ -277,21 +277,27 @@ async def proxy_chat_completion(
                 user_result = await db.execute(select(User).where(User.id == user_id))
                 user = user_result.scalar_one_or_none()
 
-        # Fallback: container token
+        # Dedicated per-user container token
         if user is None:
             result = await db.execute(
                 select(Container).where(Container.container_token == container_token)
             )
             container = result.scalar_one_or_none()
-            if container is None:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-            user_result = await db.execute(select(User).where(User.id == container.user_id))
-            user = user_result.scalar_one_or_none()
+            if container is not None:
+                user_result = await db.execute(select(User).where(User.id == container.user_id))
+                user = user_result.scalar_one_or_none()
 
-        if user is None or not user.is_active:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account disabled")
+        # Shared runtime service token: allowed, but usage/quota is enforced at higher layers.
+        if user is None and settings.shared_openclaw_system_token and container_token == settings.shared_openclaw_system_token:
+            logger.info("Accepted shared OpenClaw system token for LLM proxy request")
 
-        await _check_quota(db, user)
+        elif user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+        if user is not None:
+            if not user.is_active:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account disabled")
+            await _check_quota(db, user)
 
     # 2. Resolve provider
     litellm_model, api_key, api_base, extra_headers = _resolve_provider(model)

@@ -13,7 +13,7 @@ from app.config import settings
 from app.db.engine import engine
 from app.db.models import Base
 from app.logging_setup import setup_logging, log_settings_summary
-from app.routes import auth, llm, proxy, admin
+from app.routes import auth, llm, proxy, admin, shared_openclaw
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -117,7 +117,15 @@ async def _migrate_add_missing_columns() -> None:
                 nullable = "NULL" if col.nullable else "NOT NULL"
                 default_clause = ""
                 if col.server_default is not None:
-                    default_clause = f" DEFAULT {col.server_default.arg.text}"
+                    default_arg = getattr(col.server_default, "arg", None)
+                    if hasattr(default_arg, "text"):
+                        default_sql = default_arg.text
+                    elif isinstance(default_arg, str):
+                        escaped_default = default_arg.replace("'", "''")
+                        default_sql = f"'{escaped_default}'"
+                    else:
+                        default_sql = str(default_arg)
+                    default_clause = f" DEFAULT {default_sql}"
 
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type} {nullable}{default_clause}'
                 logger.info("Auto-migration: %s", ddl)
@@ -159,6 +167,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(llm.router)
 app.include_router(proxy.router)
+# 对于共享openclaw的路由api注册
+app.include_router(shared_openclaw.router)
 app.include_router(admin.router)
 
 

@@ -34,6 +34,7 @@ class RegisterRequest(BaseModel):
     username: str
     email: str
     password: str
+    runtime_mode: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -74,7 +75,11 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if await get_user_by_email(db, req.email):
         raise HTTPException(status_code=400, detail="邮箱已被注册")
 
-    user = await create_user(db, req.username, req.email, req.password)
+    runtime_mode = req.runtime_mode or "dedicated"
+    if runtime_mode not in {"dedicated", "shared"}:
+        raise HTTPException(status_code=400, detail="runtime_mode must be dedicated or shared")
+
+    user = await create_user(db, req.username, req.email, req.password, runtime_mode=runtime_mode)
     return TokenResponse(
         access_token=create_access_token(user.id, user.role),
         refresh_token=create_refresh_token(user.id),
@@ -145,6 +150,7 @@ async def get_me(user: User = Depends(get_current_user)):
         email=user.email,
         role=user.role,
         quota_tier=user.quota_tier,
+        runtime_mode=user.runtime_mode,
         is_active=user.is_active,
     )
 

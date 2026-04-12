@@ -13,11 +13,14 @@ export interface UserSummary {
   email: string;
   role: string;
   quota_tier: string;
+  runtime_mode: string;
   is_active: boolean;
   created_at: string;
   container_status: string | null;
   container_docker_id: string | null;
   container_created_at: string | null;
+  shared_agent_id: string | null;
+  shared_agent_status: string | null;
   tokens_used_today: number;
 }
 

@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Docker
     openclaw_image: str = "openclaw:latest"
     container_network: str = "openclaw-internal"
+
+    # Shared OpenClaw runtime，共享openclaw容器时的参数
+    shared_openclaw_enabled: bool = True
+    shared_openclaw_url: str = "http://shared-openclaw:18080"
+    shared_openclaw_timeout_seconds: int = 120
+    shared_openclaw_system_token: str = ""
     user_container_publish_ports: bool = True
     user_container_bind_ip: str = "0.0.0.0"
     container_tz: str = "Asia/Shanghai"

@@ -28,6 +28,8 @@ export default function UsersPage() {
   const [editUser, setEditUser] = useState<UserSummary | null>(null);
   const [editRole, setEditRole] = useState("");
   const [editTier, setEditTier] = useState("");
+  //dedicated表示独立容器模式，shared表示共享容器模式
+  const [editRuntimeMode, setEditRuntimeMode] = useState("dedicated");
   const [editActive, setEditActive] = useState(true);
 
   // Password dialog
@@ -52,6 +54,7 @@ export default function UsersPage() {
     setEditUser(user);
     setEditRole(user.role);
     setEditTier(user.quota_tier);
+    setEditRuntimeMode(user.runtime_mode || "dedicated");
     setEditActive(user.is_active);
   }
 
@@ -61,6 +64,7 @@ export default function UsersPage() {
       await updateUser(editUser.id, {
         role: editRole,
         quota_tier: editTier,
+        runtime_mode: editRuntimeMode,
         is_active: editActive,
       });
       toast.success("用户已更新");
@@ -113,6 +117,7 @@ export default function UsersPage() {
                 <TableHead>邮箱</TableHead>
                 <TableHead>角色</TableHead>
                 <TableHead>配额</TableHead>
+                <TableHead>运行模式</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>今日用量</TableHead>
                 <TableHead>创建时间</TableHead>
@@ -130,6 +135,16 @@ export default function UsersPage() {
                     </Badge>
                   </TableCell>
                   <TableCell>{user.quota_tier}</TableCell>
+                  <TableCell>
+                    <Badge variant={user.runtime_mode === "shared" ? "secondary" : "outline"}>
+                      {user.runtime_mode}
+                    </Badge>
+                    {user.shared_agent_id ? (
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {user.shared_agent_id}
+                      </div>
+                    ) : null}
+                  </TableCell>
                   <TableCell>
                     <Badge variant={user.is_active ? "default" : "destructive"}>
                       {user.is_active ? "正常" : "禁用"}
@@ -182,6 +197,16 @@ export default function UsersPage() {
                   <SelectItem value="free">free</SelectItem>
                   <SelectItem value="basic">basic</SelectItem>
                   <SelectItem value="pro">pro</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>运行模式</Label>
+              <Select value={editRuntimeMode} onValueChange={(v: string | null) => v && setEditRuntimeMode(v)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dedicated">dedicated</SelectItem>
+                  <SelectItem value="shared">shared</SelectItem>
                 </SelectContent>
               </Select>
             </div>

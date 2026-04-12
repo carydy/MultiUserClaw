@@ -74,7 +74,7 @@ export async function getUsers(page = 1, pageSize = 20, search = ""): Promise<Pa
   return request<PaginatedUsers>(`/api/admin/users?${params}`);
 }
 
-export async function updateUser(userId: string, data: { role?: string; quota_tier?: string; is_active?: boolean }) {
+export async function updateUser(userId: string, data: { role?: string; quota_tier?: string; runtime_mode?: string; is_active?: boolean }) {
   return request(`/api/admin/users/${userId}`, { method: "PUT", body: JSON.stringify(data) });
 }
 
