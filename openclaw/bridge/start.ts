@@ -4,27 +4,12 @@ import path from "node:path";
 import { loadConfig, writeOpenclawConfig } from "./config.js";
 import { BridgeGatewayClient } from "./gateway-client.js";
 import { createServer } from "./server.js";
-
-async function waitForGateway(url: string, maxWaitMs = 60_000): Promise<void> {
-  const start = Date.now();
-  const checkInterval = 200; // 更频繁的检查，减少等待时间
-  const checkTimeout = 1000; // 每次检查的超时时间
-  
-  while (Date.now() - start < maxWaitMs) {
-    try {
-      const client = new BridgeGatewayClient(url);
-      await Promise.race([
-        client.start(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), checkTimeout)),
-      ]);
-      client.stop();
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, checkInterval));
-    }
-  }
-  throw new Error(`Gateway did not become ready within ${maxWaitMs}ms`);
-}
+import {
+  buildGatewayEnv,
+  connectClientWithRetry,
+  formatStartupDuration,
+  formatStartupStartedAt,
+} from "./startup.js";
 
 function resolveGatewayCommand(openclawDir: string): { cmd: string; args: string[] } {
   // In production (Docker), dist/ exists → use node openclaw.mjs directly
@@ -77,10 +62,8 @@ class GatewayManager {
 
   async start(): Promise<void> {
     this.spawnGateway();
-    await waitForGateway(this.gatewayUrl);
-    console.log("[bridge] Gateway is ready");
-    await this.client.start();
-    console.log("[bridge] Connected to gateway");
+    await connectClientWithRetry(this.client);
+    console.log("[bridge] Gateway is ready and connected");
   }
 
   private spawnGateway(): void {
@@ -134,13 +117,11 @@ class GatewayManager {
 
       // Spawn new gateway
       this.spawnGateway();
-      await waitForGateway(this.gatewayUrl);
-      console.log("[bridge] Gateway restarted and ready");
 
-      // Reconnect bridge client
+      // Reconnect bridge client with retry until the gateway is ready
       this.client = new BridgeGatewayClient(this.gatewayUrl);
-      await this.client.start();
-      console.log("[bridge] Reconnected to gateway");
+      await connectClientWithRetry(this.client);
+      console.log("[bridge] Gateway restarted and reconnected");
     } finally {
       this.restarting = false;
     }
@@ -156,7 +137,9 @@ class GatewayManager {
 export let gatewayManager: GatewayManager | null = null;
 
 async function main(): Promise<void> {
-  console.log("[bridge] Starting openclaw bridge...");
+  const startupStartedAt = new Date();
+  const startupStartedMs = Date.now();
+  console.log(`[bridge] Starting openclaw bridge at ${formatStartupStartedAt(startupStartedAt)}...`);
 
   const config = loadConfig();
 
@@ -187,15 +170,10 @@ async function main(): Promise<void> {
 
   const gatewayUrl = `ws://127.0.0.1:${config.gatewayPort}`;
   const manager = new GatewayManager(
-    openclawDir, gatewayCmd, gatewayArgs,
-    {
-      ...process.env,
-      OPENCLAW_CONFIG_PATH: path.join(config.openclawHome, "openclaw.json"),
-      OPENCLAW_STATE_DIR: config.openclawHome,
-      // In Docker multi-tenant mode, skip channels (each user gets their own container).
-      // In local dev mode (BRIDGE_ENABLE_CHANNELS=1), let channels start normally.
-      ...(process.env.BRIDGE_ENABLE_CHANNELS === "1" ? {} : { OPENCLAW_SKIP_CHANNELS: "1" }),
-    },
+    openclawDir,
+    gatewayCmd,
+    gatewayArgs,
+    buildGatewayEnv(process.env, config),
     gatewayUrl,
   );
 
@@ -207,7 +185,9 @@ async function main(): Promise<void> {
   // Start bridge HTTP server
   const server = createServer(manager.client, config, manager);
   server.listen(config.bridgePort, "0.0.0.0", () => {
+    const startupDurationMs = Date.now() - startupStartedMs;
     console.log(`[bridge] Bridge server listening on port ${config.bridgePort}`);
+    console.log(`[bridge] Startup completed in ${formatStartupDuration(startupDurationMs)}`);
   });
 
   // Graceful shutdown
