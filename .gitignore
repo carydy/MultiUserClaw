@@ -63,4 +63,4 @@ openclaw/bridge-deploy-copy
 openclaw/dist-runtime
 simple_front/dist
 openclaw/packages/libsignal-node/
-phone_front/dist
+hermes-agent

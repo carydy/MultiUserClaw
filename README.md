@@ -1,19 +1,14 @@
-# MultiUserClaw - 多用户 AI SaaS OpenClaw 平台
+# MultiUserClaw - 多用户 AI SaaS OpenClaw 和Hermes 平台
 
-基于 OpenClaw 改造的轻量级 AI 助手框架，可以快速打造商用 SaaS 平台，支持多租户隔离部署、多平台渠道接入、工具调用、定时任务和 Web 实时通信。
+基于 OpenClaw 和Hermes 改造的轻量级 AI 助手框架，可以快速打造商用 SaaS 平台，支持多租户隔离部署、多平台渠道接入、工具调用、定时任务和 Web 实时通信。
 
 **在线体验地址**：https://ai.infox-med.com:13080/ （直接注册即可使用）
-
-**当前 OpenClaw 版本**：🦞 OpenClaw 2026.4.10
-
----
 
 ## 📌 版本分支说明
 
 - **main 分支**：当前主分支，基于 OpenClaw 2026.4.10
-- **simple_web 分支**：简单的单用户 Web 界面，适合单用户测试
 - **nanobot014v3 分支**：nanobot 的 0.1.4 post v3 版本
-- **openclaw_oldfrontend 分支**：基于 OpenClaw 2026.3.3 (eae1484) 的旧版本前端
+- **hermes分支**：更换openclaw为hermes的Agent的分支
 
 ---
 
